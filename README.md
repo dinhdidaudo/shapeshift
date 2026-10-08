@@ -176,4 +176,4 @@ MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
-ShapeShift is a new, independent project created and maintained by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)). It is not a fork of, and does not reference, any other project.
+Created and maintained by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)).

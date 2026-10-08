@@ -28,7 +28,7 @@ Three rules are absolute:
 
 - **No network calls.** No `fetch`, no `XMLHttpRequest`, no analytics. The extension is fully offline.
 - **Determinism.** The same `(salt, origin, config)` must always produce the same spoofed values. Never introduce `Math.random()` or `Date.now()` into a seed-derivation path.
-- **Original work only.** ShapeShift is an independent project: do not add copied code, attribution, or references to any third-party project.
+- **Original work only.** Do not add copied code, attribution, or references to any third-party project.
 
 ---
 
