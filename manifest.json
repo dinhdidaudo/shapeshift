@@ -1,10 +1,11 @@
 {
     "manifest_version": 3,
-    "name": "ShapeShift",
-    "short_name": "ShapeShift",
+    "default_locale": "en",
+    "name": "__MSG_appName__",
+    "short_name": "__MSG_appShortName__",
     "author": "dinhdidaudo",
     "version": "1.0.0",
-    "description": "ShapeShift gives every website a different device fingerprint. Deterministic, per-origin noise for Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Timezone and more.",
+    "description": "__MSG_appDescription__",
     "homepage_url": "https://github.com/dinhdidaudo/shapeshift",
     "minimum_chrome_version": "114",
     "permissions": [
@@ -39,6 +40,7 @@
                 "<all_urls>"
             ],
             "js": [
+                "core/config-schema.js",
                 "core/config.js",
                 "core/hash.js",
                 "core/prng.js",
@@ -59,6 +61,7 @@
                 "content/hooks_media.js",
                 "content/hooks_geolocation.js",
                 "content/hooks_detection.js",
+                "content/test_fingerprint.js",
                 "content/bootstrap.js",
                 "content/stats_tracker.js",
                 "content/content_main.js"
@@ -80,11 +83,10 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "content/webgl_page_patch.js",
                 "content/test_fingerprint_page.js"
             ],
             "matches": [
-                "<all_urls>"
+                "https://*/*"
             ]
         }
     ]

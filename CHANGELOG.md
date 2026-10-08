@@ -5,6 +5,80 @@ All notable changes to ShapeShift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Content script load order (P0 1.1)** — `content/test_fingerprint.js` is now
+  listed in `manifest.json`, so `content_main.js` no longer bails out before
+  installing any ISOLATED-world hook.
+- **Flat vs nested config (P0 1.2)** — a single `core/config-schema.js` now owns
+  the defaults, the schema version and the flat-key map. `core/config.js`,
+  `popup/popup.js` and `options/options.js` all derive from it, so the Options
+  switches that write flat keys (`blockIPLeak`, `forceRelay`,
+  `randomizeDeviceIds`, `spoofDeviceLabels`, `useRealDistribution`,
+  `hideGamepads`, `fuzzHardwareConcurrency`, ...) actually reach the hooks that
+  read the nested groups.
+- **Statistics counters (P0 1.3)** — `content/stats_tracker.js` tracks all 13
+  signals, and `background/service-worker.js` aggregates
+  `totalMediaCodecReads`, `totalDrmReads`, `totalGeolocationReads` and
+  `totalTouchReads` for the popup and Options page.
+- **Salt race between tabs (P0 1.5)** — `core/salts.js` re-reads `ss_salt` after
+  writing and adopts the stored value when another tab won the race, and it
+  follows `chrome.storage.onChanged` so a rotation propagates to open tabs.
+- **MAIN-world re-initialisation (P0 1.6 / Security §3)** — the MAIN-world
+  injector publishes a per-load nonce at `document_start` and refuses any
+  `SS_INIT_PAGE_HOOKS` message that does not echo it; the one-shot latch is only
+  flipped after the payload validates.
+- **Notification icon (P0 1.7)** — `chrome.notifications.create` uses the
+  existing `images/icon128.png`.
+- **Per-read noise stability (P1 2.1)** — Canvas and Audio noise is index-keyed
+  instead of PRNG-streamed, so reading the same canvas or `AudioBuffer` twice
+  returns identical samples.
+- **`removeEventListener` mapping (P1 2.2)** and the `matchMedia` proxy (P1 2.3)
+  in `content/hooks_touch.js`; `measureText` now returns a real `TextMetrics`
+  (P1 2.4); `performance.now`, `navigator.plugins`/`mimeTypes` and
+  `getBattery` keep their native shapes (P1 2.5-2.7); WebRTC SDP candidate
+  removal keeps newline structure and device IDs derive from a full 32-bit hash
+  (P1 2.8-2.9).
+- **Timezone, screen and detection hooks (P1 2.10-2.13)** — `Intl` statics are
+  preserved, `Date.prototype.toLocale*` is left alone, screen getters stay
+  configurable and `window.innerWidth`/`innerHeight` follow the live viewport,
+  and `Error.prototype.stack` is no longer patched.
+- **Timing jitter is opt-in (P1 2.14)** — `core/timing.js` short-circuits the
+  synchronous delay helpers unless `config.timingJitter === true`, and the
+  remaining helper is iteration-based rather than a busy-wait.
+- **Options numeric bounds (P1 2.15)** and tab reload after
+  `Generate new identity` (P1 2.16).
+- **Protection score alignment (P1 2.17)** — popup and Options score the same
+  module set.
+- **Statistics serialisation (P1 2.18)** and storage re-initialisation on
+  browser startup (P1 2.19).
+- **Rotation alarm interval (P1 2.20)** — the alarm period follows
+  `rotationIntervalHours` with a 0.5-hour floor instead of a fixed 60 minutes.
+- **Hook failure reporting (P1 2.22)** — `content/content_main.js` counts failed
+  installers and always reports them, even when `debug` is off.
+- **Per-surface seeds (P1 2.26)** — `env.prngFor(surfaceId)` derives an
+  independent stream from `(salt, origin, surfaceId)`, so toggling one module no
+  longer shifts another module's reported values.
+
+### Changed
+
+- `web_accessible_resources` is limited to the self-test helper and no longer
+  exposes the removed `content/webgl_page_patch.js`.
+- `content/test_fingerprint.js` is a diagnostic only: `content/content_main.js`
+  installs the hooks even when the self-test failed to load.
+
+### Security
+
+- Rotation notifications and the automatic tab reload after a rotation are now
+  explicit switches (`notifyOnRotation`, `reloadTabsOnRotation`).
+- `SECURITY.md` and `PRIVACY.md` document the threat model, the five
+  `chrome.storage.local` keys, the nonce handshake and the remaining known
+  limitations.
+
+---
+
 ## [2.0.0] - 2024-12-09
 
 ### 🎉 Major Release - Complete Overhaul

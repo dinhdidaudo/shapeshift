@@ -5,7 +5,8 @@
 
   installers.push(function installFontHooks (env) {
     if (!env || !env.config?.enableFontProtection) return;
-    const { prng, noise, config } = env;
+    const prng = env.prngFor ? env.prngFor('fonts') : env.prng;
+    const { noise, config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -39,10 +40,14 @@
 
           const metrics = origMeasureText.call(this, text);
 
-          // Add slight noise to all metrics
+          // Add slight noise to all metrics. Returning a plain object here is
+          // detectable: `measureText(t) instanceof TextMetrics` must stay true
+          // and the native prototype must be preserved. TextMetrics is not
+          // constructible, so build an object that inherits from its prototype
+          // and define the fields as own properties instead.
           const noiseFactor = 0.01; // 1% variation
 
-          const noisedMetrics = {
+          const noisedValues = {
             width: metrics.width + noise(metrics.width * noiseFactor),
             actualBoundingBoxLeft: metrics.actualBoundingBoxLeft + noise(noiseFactor),
             actualBoundingBoxRight: metrics.actualBoundingBoxRight + noise(noiseFactor),
@@ -56,6 +61,25 @@
             emHeightAscent: metrics.emHeightAscent,
             emHeightDescent: metrics.emHeightDescent
           };
+
+          let noisedMetrics;
+          try {
+            noisedMetrics = Object.create(TextMetrics.prototype);
+          } catch (e) {
+            noisedMetrics = {};
+          }
+          for (const key in noisedValues) {
+            try {
+              Object.defineProperty(noisedMetrics, key, {
+                value: noisedValues[key],
+                enumerable: true,
+                configurable: true,
+                writable: false
+              });
+            } catch (e) {
+              noisedMetrics[key] = noisedValues[key];
+            }
+          }
 
           log('[shapeshift][fonts] measureText noised:', text.substring(0, 20));
           return noisedMetrics;
@@ -79,13 +103,18 @@
             globalThis.ssTimingUtils.executionJitter();
           }
 
-          // Call original but add randomness to prevent font enumeration
+          // Call original but perturb the result to prevent font enumeration.
+          // Must be deterministic for a given font string: a fresh PRNG draw
+          // per call made check() return different answers for the same font
+          // on every read, which is itself a strong fingerprinting signal.
           const result = origCheck.call(this, font, text);
 
-          // Occasionally flip the result for uncommon fonts
-          if (prng() < 0.1) { // 10% chance
-            log('[shapeshift][fonts] check() result flipped for:', font);
-            return !result;
+          if (globalThis.ssHashString) {
+            const flip = (globalThis.ssHashString(String(font) + String(text || '')) % 10) === 0;
+            if (flip) {
+              log('[shapeshift][fonts] check() result flipped for:', font);
+              return !result;
+            }
           }
 
           return result;
@@ -99,8 +128,7 @@
     safeWrap(() => {
       if (!document.fonts) return;
 
-      const origFonts = document.fonts;
-      const fontArray = Array.from(origFonts);
+      const fontArray = Array.from(document.fonts);
 
       // Shuffle font order deterministically
       const shuffledFonts = fontArray.slice();

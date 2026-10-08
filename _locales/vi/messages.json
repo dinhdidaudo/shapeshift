@@ -1,0 +1,14 @@
+{
+  "appName": {
+    "message": "ShapeShift",
+    "description": "Tên tiện ích hiển thị trên thanh công cụ Chrome."
+  },
+  "appShortName": {
+    "message": "ShapeShift",
+    "description": "Tên rút gọn của tiện ích."
+  },
+  "appDescription": {
+    "message": "ShapeShift cấp cho mỗi trang web một dấu vết thiết bị khác nhau. Nhiễu xác định theo từng origin cho Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Timezone và hơn thế nữa.",
+    "description": "Mô tả ngắn gọn hiển thị trong chrome://extensions."
+  }
+}

@@ -2,6 +2,7 @@
 (function () {
   const hash = globalThis.ssHashString || (s => s.length);
   const pageScriptUrl = chrome.runtime.getURL("content/test_fingerprint_page.js");
+  let ssTestSeq = 0;
   let pageHelperReady = false;
   const debug = (globalThis.ssConfig && globalThis.ssConfig.debug) || false;
   const dlog = debug ? console.log : () => { };
@@ -67,7 +68,7 @@
   async function sampleWebGLFromPage () {
     await ensurePageHelper();
     return new Promise(resolve => {
-      const reqId = "fp-" + Math.random().toString(16).slice(2);
+      const reqId = "ss-test-" + (++ssTestSeq);
       function onMessage (event) {
         const data = event.data;
         if (!data || data.ssTestResponse !== reqId) return;
@@ -75,7 +76,7 @@
         resolve(data.webgl || "webgl-error");
       }
       window.addEventListener("message", onMessage);
-      window.postMessage({ ssTestRequest: reqId }, "*");
+      window.postMessage({ ssTestRequest: reqId }, location.origin);
       setTimeout(() => {
         window.removeEventListener("message", onMessage);
         resolve("webgl-timeout");

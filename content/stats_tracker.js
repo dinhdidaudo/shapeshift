@@ -14,7 +14,11 @@
     screenReads: 0,
     fontReads: 0,
     timezoneReads: 0,
-    sensorReads: 0
+    sensorReads: 0,
+    mediaCodecReads: 0,
+    drmReads: 0,
+    geolocationReads: 0,
+    touchReads: 0
   };
 
   let flushTimeout = null;

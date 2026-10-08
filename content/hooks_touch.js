@@ -5,7 +5,8 @@
 
   installers.push(function installTouchHooks (env) {
     if (!env || !env.config?.enableTouchProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('touch') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -94,28 +95,46 @@
             // (hover: none) = touch device
             // (hover: hover) = mouse
 
+            // Platform methods must be invoked with the real MediaQueryList as
+            // `this`; calling them through a Proxy throws "Illegal invocation".
+            // Every function is therefore returned already bound to `result`,
+            // and the getters are read from `result` so `matches` and the
+            // change listeners stay consistent with each other.
+            function spoofedMatches () {
+              if (lowerQuery.includes('pointer:') && lowerQuery.includes('coarse')) {
+                // Touch device query
+                return shouldHaveTouch;
+              } else if (lowerQuery.includes('pointer:') && lowerQuery.includes('fine')) {
+                // Mouse/precise pointer query
+                return !shouldHaveTouch;
+              } else if (lowerQuery.includes('hover:') && lowerQuery.includes('none')) {
+                // No hover capability (touch)
+                return shouldHaveTouch;
+              } else if (lowerQuery.includes('hover:') && lowerQuery.includes('hover')) {
+                // Hover capability (mouse)
+                return !shouldHaveTouch;
+              }
+              return result.matches;
+            }
+
             const handler = {
               get(target, prop) {
-                if (prop === 'matches') {
-                  if (lowerQuery.includes('pointer:') && lowerQuery.includes('coarse')) {
-                    // Touch device query
-                    return shouldHaveTouch;
-                  } else if (lowerQuery.includes('pointer:') && lowerQuery.includes('fine')) {
-                    // Mouse/precise pointer query
-                    return !shouldHaveTouch;
-                  } else if (lowerQuery.includes('hover:') && lowerQuery.includes('none')) {
-                    // No hover capability (touch)
-                    return shouldHaveTouch;
-                  } else if (lowerQuery.includes('hover:') && lowerQuery.includes('hover')) {
-                    // Hover capability (mouse)
-                    return !shouldHaveTouch;
-                  }
-                }
-                return target[prop];
+                if (prop === 'matches') return spoofedMatches();
+                const value = target[prop];
+                if (typeof value === 'function') return value.bind(target);
+                return value;
               }
             };
 
-            return new Proxy(result, handler);
+            const proxy = new Proxy(result, handler);
+            // The Proxy forwards listener registration to the real object, whose
+            // `matches` is the un-spoofed one. Force the initial value so a
+            // listener that fires immediately observes the spoofed state.
+            try {
+              Object.defineProperty(proxy, 'matches', { value: spoofedMatches(), configurable: true });
+            } catch (e) { /* non-extensible MediaQueryList; the get trap still wins */ }
+
+            return proxy;
           }
 
           return result;
@@ -135,24 +154,48 @@
       if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origPointerEvent)) {
         globalThis.ssStealth.markPatched(origPointerEvent);
 
-        // Add event listener wrapper to add timing jitter
+        // Add event listener wrapper to add timing jitter.
+        // Wrapped listeners are registered in a WeakMap so removeEventListener
+        // still resolves the original listener and actually detaches it.
         const origAddEventListener = EventTarget.prototype.addEventListener;
+        const origRemoveEventListener = EventTarget.prototype.removeEventListener;
+        const listenerMap = new WeakMap();
+
         if (!globalThis.ssStealth.isPatched(origAddEventListener)) {
           globalThis.ssStealth.markPatched(origAddEventListener);
+          globalThis.ssStealth.markPatched(origRemoveEventListener);
 
           EventTarget.prototype.addEventListener = function(type, listener, options) {
-            if (type.startsWith('pointer') || type.startsWith('touch')) {
-              if (typeof listener === 'function') {
-                const wrappedListener = function(event) {
+            if ((type.startsWith('pointer') || type.startsWith('touch')) && typeof listener === 'function') {
+              let perTarget = listenerMap.get(listener);
+              if (!perTarget) {
+                perTarget = new WeakMap();
+                listenerMap.set(listener, perTarget);
+              }
+              let wrappedListener = perTarget.get(this);
+              if (!wrappedListener) {
+                wrappedListener = function(event) {
                   if (globalThis.ssTimingUtils) {
                     globalThis.ssTimingUtils.executionJitter();
                   }
                   return listener.call(this, event);
                 };
-                return origAddEventListener.call(this, type, wrappedListener, options);
+                perTarget.set(this, wrappedListener);
               }
+              return origAddEventListener.call(this, type, wrappedListener, options);
             }
             return origAddEventListener.call(this, type, listener, options);
+          };
+
+          EventTarget.prototype.removeEventListener = function(type, listener, options) {
+            if ((type.startsWith('pointer') || type.startsWith('touch')) && typeof listener === 'function') {
+              const perTarget = listenerMap.get(listener);
+              const wrappedListener = perTarget && perTarget.get(this);
+              if (wrappedListener) {
+                return origRemoveEventListener.call(this, type, wrappedListener, options);
+              }
+            }
+            return origRemoveEventListener.call(this, type, listener, options);
           };
 
           log('[shapeshift][touch] Pointer/touch event listeners wrapped with timing jitter');

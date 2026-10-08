@@ -5,7 +5,8 @@
 
   installers.push(function installGeolocationHooks (env) {
     if (!env || !env.config?.enableGeolocationProtection) return;
-    const { prng, noise, config } = env;
+    const prng = env.prngFor ? env.prngFor('geolocation') : env.prng;
+    const { noise, config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 

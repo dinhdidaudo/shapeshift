@@ -9,6 +9,7 @@ Rebuilt from `browser-fingerprint-shuffler` with a premium control-room interfac
 - Repository: `git@github.com:dinhdidaudo/shapeshift.git`
 - Author: **dinhdidaudo**
 - License: MIT
+- Privacy policy: [PRIVACY.md](PRIVACY.md) · Security policy: [SECURITY.md](SECURITY.md)
 
 ## Highlights
 
@@ -115,8 +116,10 @@ An origin missing from `ss_site_settings` is protected; pausing is recorded expl
 ```bash
 npm run verify      # structural + syntax gate (run before every commit)
 npm run lint        # same gate in lint mode
+npm run test        # alias for verify
+npm run build       # package the runtime tree into dist/
 npm run icons       # regenerate images/icon*.png
-npm run screenshots # regenerate screenshot.png
+npm run migrate     # one-shot fp* -> ss* namespace migration (idempotent)
 ```
 
 Enable verbose logging in **Settings → Advanced → Debug mode**. Console output is prefixed:

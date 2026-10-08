@@ -1,6 +1,10 @@
 // ShapeShift - options controller (control room).
 
-const DEFAULTS = { perOriginFingerprint: true, useGaussianNoise: true, useStrongKDF: true, kdfIterations: 1000, enableCanvasNoise: true, canvasNoiseStrength: 2, enableWebGLMasking: true, webglJitter: 2, maskWebGLVendorStrings: true, shuffleWebGLExtensions: true, enableAudioNoise: true, audioNoiseStrength: 1e-7, enableNavigatorFuzz: true, fuzzHardwareConcurrency: true, fuzzDeviceMemory: true, shuffleLanguages: true, enableWebRTCProtection: true, blockIPLeak: true, randomizeSDP: true, forceRelay: false, enableMediaDeviceProtection: true, randomizeDeviceIds: true, spoofDeviceLabels: true, enableScreenProtection: true, useRealDistribution: true, enableFontProtection: true, enableTimezoneProtection: true, enableSensorProtection: true, hideGamepads: true, enableTouchProtection: true, enableUserAgentProtection: true, enableMediaProtection: true, enableGeolocationProtection: true, enableDetectionResistance: true, autoRotateFingerprint: false, rotationIntervalHours: 24, rotateOnStartup: false, debug: false };
+// Architecture §4: the defaults have exactly one definition, in
+// core/config-schema.js. options.html loads that file before this controller,
+// so the Options page and the hooks can no longer disagree about a default.
+// ssFlatDefaults expands the nested groups into the flat keys rendered here.
+const DEFAULTS = globalThis.ssFlatDefaults || {};
 
 const GROUPS = {
   groupSurfaces: [
@@ -49,6 +53,8 @@ const GROUPS = {
     { key: 'enableDetectionResistance', name: 'Detection resistance', desc: 'Blunt extension and automation detection.' }
   ],
   groupDebug: [
+    { key: 'notifyOnRotation', name: 'Notify on rotation', desc: 'Show a system notification when the identity rotates.' },
+    { key: 'reloadTabsOnRotation', name: 'Reload tabs on rotation', desc: 'Refresh open http(s) tabs so they pick up the new identity.' },
     { key: 'debug', name: 'Debug logging', desc: 'Verbose console output for troubleshooting.' }
   ]
 };
@@ -164,22 +170,57 @@ function renderGroups(config) {
   });
 }
 
+// Bounds for the free-form numeric inputs. A negative or absurd value used to be
+// written straight into ssConfig, where it reached the hooks as NaN/garbage
+// (e.g. a negative kdfIterations made seed derivation degrade to one pass).
+const NUMERIC_BOUNDS = {
+  canvasNoiseStrength: [0, 10],
+  webglJitter: [0, 10],
+  audioNoiseStrength: [0, 1],
+  kdfIterations: [1, 100000],
+  rotationIntervalHours: [1, 8760]
+};
+
+function clampNumber(key, raw) {
+  const bounds = NUMERIC_BOUNDS[key];
+  let value = Number(raw);
+  if (!isFinite(value)) {
+    value = Number(DEFAULTS[key]);
+    if (!isFinite(value)) value = 0;
+  }
+  if (bounds) value = Math.min(bounds[1], Math.max(bounds[0], value));
+  return value;
+}
+
 function collect() {
   const config = {};
   const nodes = document.querySelectorAll('[data-key]');
   for (let i = 0; i < nodes.length; i++) {
     const el = nodes[i];
-    config[el.dataset.key] = el.dataset.kind === 'number' ? Number(el.value) : el.checked;
+    config[el.dataset.key] = el.dataset.kind === 'number' ? clampNumber(el.dataset.key, el.value) : el.checked;
   }
   return config;
 }
 
+// The canonical set of protection surfaces, shared with popup.js `MODULES`.
+// The score used to be computed over every switch in GROUPS (33 of them here)
+// while the popup scored the 10 primary surfaces, so the same configuration
+// displayed two different numbers. Both UIs now report the same percentage.
+const MODULE_KEYS = [
+  'enableCanvasNoise',
+  'enableWebGLMasking',
+  'enableAudioNoise',
+  'enableWebRTCProtection',
+  'enableScreenProtection',
+  'enableFontProtection',
+  'enableTimezoneProtection',
+  'enableSensorProtection',
+  'enableNavigatorFuzz',
+  'enableGeolocationProtection'
+];
+
 function switchKeys() {
-  const keys = [];
-  Object.keys(GROUPS).forEach(function (g) {
-    GROUPS[g].forEach(function (item) { if (!isControl(item)) keys.push(item.key); });
-  });
-  return keys;
+  return MODULE_KEYS;
 }
 
 function updateOverview(config) {
@@ -197,7 +238,7 @@ function updateOverview(config) {
 async function refreshStats() {
   const data = await get(['ss_stats', 'ss_site_settings']);
   const stats = data.ss_stats || {};
-  const total = (stats.totalCanvasReads || 0) + (stats.totalWebGLCalls || 0) + (stats.totalAudioCalls || 0) + (stats.totalNavigatorReads || 0) + (stats.totalWebRTCCalls || 0) + (stats.totalScreenReads || 0) + (stats.totalFontReads || 0) + (stats.totalTimezoneReads || 0) + (stats.totalSensorReads || 0);
+  const total = (stats.totalCanvasReads || 0) + (stats.totalWebGLCalls || 0) + (stats.totalAudioCalls || 0) + (stats.totalNavigatorReads || 0) + (stats.totalWebRTCCalls || 0) + (stats.totalScreenReads || 0) + (stats.totalFontReads || 0) + (stats.totalTimezoneReads || 0) + (stats.totalSensorReads || 0) + (stats.totalMediaCodecReads || 0) + (stats.totalDrmReads || 0) + (stats.totalGeolocationReads || 0) + (stats.totalTouchReads || 0);
   const sites = Object.keys(data.ss_site_settings || {}).length;
   if ($('statSites')) $('statSites').textContent = String(sites);
   if ($('statSignals')) $('statSignals').textContent = String(total);
@@ -322,8 +363,19 @@ async function main() {
       await remove('ss_salt');
       const rotation = (await get(['ss_rotation_info'])).ss_rotation_info || {};
       await set({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
-      toast('New identity generated');
+      toast('New identity generated - reloading tabs');
       refreshStats();
+      // A new salt only reaches the page on the next load, so reload every
+      // http(s) tab here the way the popup already does. Without this the new
+      // identity existed in storage but no open page ever picked it up.
+      try {
+        const tabs = await new Promise(function (resolve) {
+          chrome.tabs.query({}, function (list) { resolve(list || []); });
+        });
+        for (const t of tabs) {
+          if (t && t.url && /^https?:/i.test(t.url) && t.id != null) chrome.tabs.reload(t.id);
+        }
+      } catch (e) { /* reload is best-effort */ }
     });
   }
 

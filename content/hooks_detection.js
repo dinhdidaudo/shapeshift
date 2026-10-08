@@ -5,7 +5,8 @@
 
   installers.push(function installDetectionResistanceHooks (env) {
     if (!env || !env.config?.enableDetectionResistance) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('detection') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -167,79 +168,16 @@
       }
     });
 
-    // Prevent chrome.app detection (extension detection)
-    safeWrap(() => {
-      // chrome.app is deprecated but still checked
-      if (window.chrome && !window.chrome.app) return;
+    // chrome.app / chrome.loadTimes / chrome.csi are page-world globals. An
+    // ISOLATED content script sees a *different* `window.chrome` object, so
+    // deleting them here changed nothing the page could observe while giving a
+    // false sense of protection. The MAIN-world injector owns that surface.
 
-      try {
-        // Remove chrome.app entirely
-        delete window.chrome.app;
-        log('[shapeshift][detection] Removed chrome.app');
-      } catch (e) {
-        // May not be configurable
-      }
-    });
-
-    // Prevent chrome.loadTimes detection (extension/headless detection)
-    safeWrap(() => {
-      // chrome.loadTimes is deprecated and removed in newer Chrome
-      if (!window.chrome || !window.chrome.loadTimes) return;
-
-      try {
-        delete window.chrome.loadTimes;
-        log('[shapeshift][detection] Removed chrome.loadTimes');
-      } catch (e) {
-        // May not be configurable
-      }
-    });
-
-    // Prevent chrome.csi detection (headless/extension detection)
-    safeWrap(() => {
-      if (!window.chrome || !window.chrome.csi) return;
-
-      try {
-        delete window.chrome.csi;
-        log('[shapeshift][detection] Removed chrome.csi');
-      } catch (e) {
-        // May not be configurable
-      }
-    });
-
-    // Hook Error.stack to prevent extension detection via stack traces
-    safeWrap(() => {
-      const OrigError = Error;
-      const origStackDescriptor = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
-
-      if (!origStackDescriptor || !origStackDescriptor.get) {
-        // Stack might be a simple property, not a getter
-        return;
-      }
-
-      const origStackGetter = origStackDescriptor.get;
-
-      Object.defineProperty(Error.prototype, 'stack', {
-        get: function() {
-          if (globalThis.ssTimingUtils) {
-            globalThis.ssTimingUtils.executionJitter();
-          }
-
-          let stack = origStackGetter.call(this);
-
-          // Remove extension URLs from stack traces
-          // chrome-extension:// urls can leak extension IDs
-          if (stack && typeof stack === 'string') {
-            stack = stack.replace(/chrome-extension:\/\/[a-z]{32}/g, 'chrome-extension://[redacted]');
-          }
-
-          return stack;
-        },
-        configurable: true,
-        enumerable: false
-      });
-
-      log('[shapeshift][detection] Error.stack hooked to hide extension URLs');
-    });
+    // Error.prototype.stack is deliberately NOT overridden any more. Patching a
+    // global prototype that every error path in every page uses cost real
+    // performance and risked breaking frameworks' stack parsing for a marginal
+    // gain. Extension URLs are never exposed to the page world in the first
+    // place, so there was nothing to redact from a page-visible stack.
 
     // Prevent resource timing detection (ad blocker detection via blocked requests)
     safeWrap(() => {

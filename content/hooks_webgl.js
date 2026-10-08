@@ -4,7 +4,8 @@
 
   installers.push(function installWebGLHooks (env) {
     if (!env || !env.config?.enableWebGLMasking) return;
-    const { prng, config, seed } = env;
+    const prng = env.prngFor ? env.prngFor('webgl') : env.prng;
+    const { config, seed } = env;
     const jitter = config.webglJitter ?? 1;
     const maskVendors = config.maskWebGLVendorStrings !== false;
     const shuffleExt = config.shuffleWebGLExtensions !== false;
@@ -82,26 +83,14 @@
       if (window.WebGL2RenderingContext) patchSelf(WebGL2RenderingContext.prototype);
     } catch (e) { /* ignore */ }
 
-    // Inject a page-context script (src) with parameters via dataset to bypass CSP inline restrictions.
-    const script = document.createElement("script");
-    script.src = chrome.runtime.getURL("content/webgl_page_patch.js");
-    script.dataset.ssJitter = String(jitter);
-    script.dataset.ssMaskVendors = String(maskVendors);
-    script.dataset.ssShuffleExt = String(shuffleExt);
-    script.dataset.ssDebug = String(debug);
-    script.dataset.ssSeed = String(seed >>> 0);
-    const parent = document.documentElement || document.head || document.body;
-    if (!parent) return;
-    parent.appendChild(script);
-    return new Promise(resolve => {
-      script.onload = () => {
-        script.remove();
-        resolve();
-      };
-      script.onerror = () => {
-        script.remove();
-        resolve();
-      };
-    });
+    // The page world is patched once, by content/page_world_injector.js in the
+    // MAIN world. This installer used to also inject content/webgl_page_patch.js
+    // into the page context, which wrapped the *same* prototypes a second time:
+    // numeric parameters were jittered twice and vendor strings received two
+    // suffixes. That duplicate script also forced a second entry into
+    // web_accessible_resources, widening the extension's detectable surface.
+    // patchSelf() above is still needed: the ISOLATED world has its own
+    // WebGLRenderingContext prototypes, which page_world_injector.js cannot
+    // reach, and content/test_fingerprint.js samples them from this world.
   });
 })();

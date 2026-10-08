@@ -1,0 +1,14 @@
+{
+  "appName": {
+    "message": "ShapeShift",
+    "description": "Extension name shown in the Chrome toolbar and store."
+  },
+  "appShortName": {
+    "message": "ShapeShift",
+    "description": "Short extension name used where space is limited."
+  },
+  "appDescription": {
+    "message": "ShapeShift gives every website a different device fingerprint. Deterministic, per-origin noise for Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Timezone and more.",
+    "description": "One-line summary of the extension shown in chrome://extensions."
+  }
+}

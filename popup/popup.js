@@ -1,6 +1,10 @@
 // ShapeShift - popup controller.
 
-const DEFAULTS = { perOriginFingerprint: true, useGaussianNoise: true, useStrongKDF: true, enableCanvasNoise: true, enableWebGLMasking: true, enableAudioNoise: true, enableNavigatorFuzz: true, enableWebRTCProtection: true, enableMediaDeviceProtection: true, enableScreenProtection: true, enableFontProtection: true, enableTimezoneProtection: true, enableSensorProtection: true, enableTouchProtection: true, enableUserAgentProtection: true, enableMediaProtection: true, enableGeolocationProtection: true, enableDetectionResistance: true };
+// Architecture §4: the defaults have exactly one definition, in
+// core/config-schema.js. popup.html loads that file before this controller, so
+// there is no local copy to drift out of sync with the hooks or the Options
+// page. ssFlatDefaults is the schema's flat (nested groups expanded) view.
+const DEFAULTS = globalThis.ssFlatDefaults || {};
 
 const MODULES = [
   { key: 'enableCanvasNoise', label: 'Canvas', icon: 'M3 3h18v18H3zM3 9h18M9 21V9' },
@@ -156,7 +160,7 @@ async function loadStats () {
   const data = await storageGet(['ss_stats', 'ss_rotation_info']);
   const stats = data.ss_stats || {};
   const rotation = data.ss_rotation_info || {};
-  const total = (stats.totalCanvasReads || 0) + (stats.totalWebGLCalls || 0) + (stats.totalAudioCalls || 0) + (stats.totalNavigatorReads || 0) + (stats.totalWebRTCCalls || 0) + (stats.totalScreenReads || 0) + (stats.totalFontReads || 0) + (stats.totalTimezoneReads || 0) + (stats.totalSensorReads || 0);
+  const total = (stats.totalCanvasReads || 0) + (stats.totalWebGLCalls || 0) + (stats.totalAudioCalls || 0) + (stats.totalNavigatorReads || 0) + (stats.totalWebRTCCalls || 0) + (stats.totalScreenReads || 0) + (stats.totalFontReads || 0) + (stats.totalTimezoneReads || 0) + (stats.totalSensorReads || 0) + (stats.totalMediaCodecReads || 0) + (stats.totalDrmReads || 0) + (stats.totalGeolocationReads || 0) + (stats.totalTouchReads || 0);
   if ($('sitesProtected')) $('sitesProtected').textContent = formatNumber(stats.sitesProtected || 0);
   if ($('totalCalls')) $('totalCalls').textContent = formatNumber(total);
   if ($('rotationCount')) $('rotationCount').textContent = formatNumber(rotation.rotationCount || 0);

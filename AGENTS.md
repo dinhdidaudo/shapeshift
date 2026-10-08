@@ -25,12 +25,11 @@ content/                      Content scripts (ISOLATED world)
   bootstrap.js                  Builds PRNG/env from config + origin
   stats_tracker.js              Counts intercepted reads
   content_main.js               Installs all registered hooks
-  page_world_injector.js        MAIN-world bridge (runs in page context)
-  webgl_page_patch.js           MAIN-world WebGL patch (web accessible)
+  page_world_injector.js        MAIN-world bridge + WebGL patch (page context)
   test_fingerprint.js / _page.js  Self-test harness
 popup/                        Toolbar popup — status, per-site toggle, rotation
 options/                      Full-page settings UI (the "control room")
-scripts/                      Node utilities (migration, verify, icons, screenshots)
+scripts/                      Node utilities (verify, build, icons, migration)
 refers/                       READ-ONLY upstream reference copy. Never edit.
 ```
 
@@ -82,9 +81,10 @@ Absence of an origin in `ss_site_settings` means **protection is ON** for that o
 ```bash
 npm run verify        # structural + syntax check of the whole extension
 npm run lint          # same script with lint mode
+npm run test          # alias for verify
+npm run build         # package the runtime tree into dist/
 npm run icons         # regenerate images/icon*.png
-npm run screenshots   # regenerate screenshot.png
-node scripts/rename-namespace.mjs   # one-shot fp* -> ss* migration (idempotent)
+npm run migrate       # one-shot fp* -> ss* migration (idempotent)
 ```
 
 Run `npm run verify` before every commit. It is the project's only automated gate.

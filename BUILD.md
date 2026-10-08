@@ -1,152 +1,111 @@
-# Build System Documentation
+# Build and packaging
+
+ShapeShift is plain JavaScript and loads unpacked. There is **no bundler, no
+transpiler and no runtime dependency** — the files in this repository are the
+files Chrome runs.
 
 ## Prerequisites
 
-- Node.js >= 18.0.0
-- npm >= 9.0.0
+- Node.js >= 18.0.0 (used only for the scripts in `scripts/`)
+- npm >= 9.0.0 (only to run the script shortcuts)
 
-## Setup
+There is nothing to `npm install`. Every script uses only the Node standard
+library.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `npm run verify` | Structural + syntax gate for the whole extension. **Run before every commit.** |
+| `npm run lint` | The same gate in lint mode. |
+| `npm test` | Runs the structural gate **and** the core unit tests. |
+| `npm run build` | Runs the gate, then copies the runtime tree to `dist/`. |
+| `npm run icons` | Regenerates `images/icon*.png` (pure Node, no image libraries). |
+| `npm run migrate` | One-shot `fp*` -> `ss*` namespace migration. Idempotent. |
+
+## Packaging
 
 ```bash
-# Install dependencies
-npm install
+npm run build            # -> dist/
+node scripts/build.mjs --out some/other/dir
 ```
 
-## Build Commands
+The build runs `scripts/verify.mjs` first and aborts if the gate fails. It then
+copies the runtime tree (`manifest.json`, `background/`, `core/`, `content/`,
+`popup/`, `options/`, `images/`) plus the licence and changelog into `dist/`.
+`dist/` is git-ignored.
 
-### Development Build
-```bash
-# Build once in development mode
-npm run build:dev
+## Loading the extension
 
-# Build and watch for changes
-npm run build:watch
-```
+### Chrome / Edge
 
-### Production Build
-```bash
-# Build for Chrome (optimized)
-npm run build
+1. Run `npm run verify`.
+2. Open `chrome://extensions/`.
+3. Enable **Developer mode**.
+4. Click **Load unpacked**.
+5. Select either the repository root (development) or `dist/` (packaged).
 
-# Build for Firefox
-npm run build:firefox
-```
+Firefox and Safari are not supported: the manifest targets Chromium MV3 and the
+hooks rely on `world: "MAIN"` content scripts.
 
-### Type Checking
-```bash
-# Check types without emitting files
-npm run type-check
-```
-
-### Testing
-```bash
-# Run tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-```
-
-### Linting
-```bash
-# Lint TypeScript files
-npm run lint
-```
-
-### Clean
-```bash
-# Remove build artifacts
-npm run clean
-```
-
-## Project Structure
+## Project layout
 
 ```
-shapeshift/
-├── src/                    # TypeScript source files
-│   ├── core/              # Core modules (config, crypto, etc.)
-│   ├── content/           # Content scripts and hooks
-│   └── types/             # TypeScript type definitions
-├── dist/                  # Build output (generated)
-├── images/                # Extension icons
-├── manifest.json          # Chrome extension manifest
-├── manifest.firefox.json  # Firefox extension manifest (if needed)
-├── package.json           # npm configuration
-├── tsconfig.json          # TypeScript configuration
-├── webpack.config.js      # Webpack build configuration
-└── README.md             # Main documentation
+manifest.json                 MV3 manifest (permissions, content scripts, WAR)
+background/service-worker.js  Rotation alarms, stats aggregation, message router
+core/                         Pure engine, no DOM assumptions
+  config.js                     Config load/merge/defaults from chrome.storage
+  hash.js                       Deterministic seed derivation (KDF)
+  prng.js                       Xoshiro128** + mulberry32 PRNGs
+  salts.js                      Persistent per-install salt management
+  timing.js                     Timing/jitter helpers
+  stealth.js                    Patch tracking + global cleanup
+content/                      Content scripts (ISOLATED world)
+  hooks_*.js                    One file per protected surface
+  bootstrap.js                  Builds PRNG/env from config + origin
+  stats_tracker.js              Counts intercepted reads
+  content_main.js               Installs all registered hooks
+  page_world_injector.js        MAIN-world bridge + WebGL patch
+  test_fingerprint.js / _page.js  Self-test harness
+popup/                        Toolbar popup
+options/                      Full-page settings UI
+scripts/                      Node utilities (verify, test, build, icons, migration)
+refers/                       READ-ONLY upstream reference. Never edit.
 ```
 
-## Migration from JavaScript
+## Verification gate
 
-The extension is being migrated from JavaScript to TypeScript. During the migration:
+`scripts/verify.mjs` is the structural gate. It checks:
 
-1. **Current state**: Both JS and TS files coexist
-2. **Development**: New code should be written in TypeScript
-3. **Build process**: Webpack bundles everything into `dist/`
-4. **Testing**: Load the `dist/` folder as an unpacked extension
+- `manifest.json` parses, uses MV3, and every referenced path exists
+- hooks load before `bootstrap.js`, and `content_main.js` loads last
+- every runtime JavaScript file parses (`node --check`)
+- no retired `fp*` identifiers outside `refers/`
+- no `innerHTML` in the popup or options controllers
+- every `chrome.storage.local` key matches the documented storage contract
+- required project files are present
 
-## Loading the Extension
+`scripts/test.mjs` covers the deterministic core, which the structural gate
+cannot see. It loads `core/hash.js`, `core/prng.js` and `core/config.js` and
+pins the contract that makes per-origin shaping stable:
 
-### Chrome/Edge
-1. Build the extension: `npm run build`
-2. Open `chrome://extensions/`
-3. Enable "Developer mode"
-4. Click "Load unpacked"
-5. Select the `dist/` folder
-
-### Firefox
-1. Build for Firefox: `npm run build:firefox`
-2. Open `about:debugging#/runtime/this-firefox`
-3. Click "Load Temporary Add-on"
-4. Select `dist/manifest.json`
-
-## TypeScript Configuration
-
-See `tsconfig.json` for TypeScript compiler options. Key settings:
-
-- **Target**: ES2020
-- **Module**: ESNext
-- **Strict mode**: Enabled
-- **Source maps**: Generated for debugging
-
-## Webpack Configuration
-
-See `webpack.config.js` for build settings. Key features:
-
-- **Entry points**: Each hook/module is a separate entry
-- **Output**: Bundled to `dist/` directory
-- **Loaders**: `ts-loader` for TypeScript compilation
-- **Plugins**: Copy manifest and assets
-
-## Type Definitions
-
-All TypeScript interfaces are defined in `src/types/index.ts`:
-
-- `FingerprintConfig` - Configuration options
-- `FingerprintEnv` - Runtime environment
-- `HookInstaller` - Hook function signature
-- Plus utilities and global declarations
-
-## Development Workflow
-
-1. Make changes to TypeScript files in `src/`
-2. Run `npm run build:watch` to auto-rebuild
-3. Reload the extension in browser (click reload button in extensions page)
-4. Test changes
+- `ssHashString` is deterministic, uint32-bounded and input-separating
+- the strong KDF is deterministic and separates salt, origin and iteration count
+- the PRNG is reproducible for a seed, stays in `[0,1)` and separates seeds
+- `ssNormalizeConfig` folds legacy flat keys into their nested groups
+- the canvas noise default stays identical in `core/config.js`, the ISOLATED
+  hook and the MAIN-world injector
 
 ## Troubleshooting
 
-### Build fails with TypeScript errors
-- Run `npm run type-check` to see detailed errors
-- Check that all files have proper type annotations
+### The extension does not load
 
-### Extension doesn't load
-- Ensure `dist/manifest.json` exists
-- Check browser console for errors
-- Verify all required files are in `dist/`
+- Ensure `manifest.json` is at the root you selected.
+- Run `npm run verify` and fix the reported failure.
+- Check the DevTools console for `[shapeshift]` errors.
 
-### Changes not reflecting
-- Make sure you're building (`npm run build`)
-- Reload the extension in browser
-- Clear browser cache if needed
+### Changes not reflected
+
+- Reload the extension from `chrome://extensions/`, then reload the page.
+- Confirm **Settings -> Advanced -> Debug logging** is on and look for
+  `[shapeshift][page] All hooks installed successfully`.

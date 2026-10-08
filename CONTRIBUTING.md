@@ -54,9 +54,10 @@ There are no runtime dependencies and nothing to install. `npm run verify` uses 
 |---|---|
 | `npm run verify` | Structural + syntax gate. **Run before every commit.** |
 | `npm run lint` | Same gate in lint mode. |
+| `npm test` | Alias for `npm run verify`. |
+| `npm run build` | Runs the gate, then packages the runtime tree into `dist/`. |
 | `npm run icons` | Regenerate `images/icon*.png`. |
-| `npm run screenshots` | Regenerate `screenshot.png`. |
-| `node scripts/rename-namespace.mjs` | One-shot `fp*` -> `ss*` migration. Idempotent. |
+| `npm run migrate` | One-shot `fp*` -> `ss*` migration. Idempotent. |
 
 `npm run verify` is the project's only automated gate. A pull request that does not pass it will not be merged.
 
@@ -71,7 +72,7 @@ core/                         Pure engine, no DOM assumptions
 content/                      Content scripts (ISOLATED world) + MAIN-world patches
 popup/                        Toolbar popup
 options/                      Full-page settings UI
-scripts/                      Node utilities (verify, migration, icons, screenshots)
+scripts/                      Node utilities (verify, build, icons, migration)
 refers/                       READ-ONLY upstream reference. Never edit.
 ```
 

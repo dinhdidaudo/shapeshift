@@ -9,6 +9,9 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
+  // Re-assert the storage contract on every browser start: a cleared profile,
+  // a partial sync, or a manual wipe must not leave the UI with undefined keys.
+  await initializeStorage();
   await checkRotateOnStartup();
   await setupRotationAlarm();
 });
@@ -31,6 +34,10 @@ async function initializeStorage() {
         totalFontReads: 0,
         totalTimezoneReads: 0,
         totalSensorReads: 0,
+        totalMediaCodecReads: 0,
+        totalDrmReads: 0,
+        totalGeolocationReads: 0,
+        totalTouchReads: 0,
         lastReset: new Date().toISOString()
       }
     });
@@ -109,7 +116,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function updateStatistics(data, tabUrl) {
+// Serialize statistics read-modify-write. Content scripts flush on independent
+// timers, so two overlapping updateStatistics() calls could both read the same
+// snapshot and the later write silently discarded the earlier increments.
+// Chaining every update onto one promise makes the cycle atomic per worker.
+let statsQueue = Promise.resolve();
+
+function updateStatistics(data, tabUrl) {
+  const run = statsQueue.then(() => applyStatistics(data, tabUrl), () => applyStatistics(data, tabUrl));
+  // Keep the chain alive after a failure without unhandled rejections.
+  statsQueue = run.catch(() => {});
+  return run;
+}
+
+async function applyStatistics(data, tabUrl) {
   try {
     const result = await chrome.storage.local.get(['ss_stats']);
     let stats = result.ss_stats || {};
@@ -140,6 +160,10 @@ async function updateStatistics(data, tabUrl) {
       totalFontReads: (stats.totalFontReads || 0) + (data.fontReads || 0),
       totalTimezoneReads: (stats.totalTimezoneReads || 0) + (data.timezoneReads || 0),
       totalSensorReads: (stats.totalSensorReads || 0) + (data.sensorReads || 0),
+      totalMediaCodecReads: (stats.totalMediaCodecReads || 0) + (data.mediaCodecReads || 0),
+      totalDrmReads: (stats.totalDrmReads || 0) + (data.drmReads || 0),
+      totalGeolocationReads: (stats.totalGeolocationReads || 0) + (data.geolocationReads || 0),
+      totalTouchReads: (stats.totalTouchReads || 0) + (data.touchReads || 0),
       lastUpdate: new Date().toISOString(),
       lastReset: stats.lastReset || new Date().toISOString()
     };
@@ -177,6 +201,10 @@ async function resetStatistics() {
       totalFontReads: 0,
       totalTimezoneReads: 0,
       totalSensorReads: 0,
+      totalMediaCodecReads: 0,
+      totalDrmReads: 0,
+      totalGeolocationReads: 0,
+      totalTouchReads: 0,
       lastReset: new Date().toISOString()
     }
   });
@@ -207,7 +235,9 @@ async function checkAndRotateFingerprint() {
     return; // Auto-rotation disabled
   }
 
-  const intervalHours = config.rotationIntervalHours || 24;
+  // Same clamp as setupRotationAlarm(): a 0.5 h setting must mean 30 minutes
+  // here too, or the alarm fires while this check still thinks 24 h remain.
+  const intervalHours = Math.max(0.5, Number(config.rotationIntervalHours) || 24);
   const intervalMs = intervalHours * 60 * 60 * 1000;
   const lastRotation = rotationInfo.lastRotation ? new Date(rotationInfo.lastRotation) : new Date(0);
   const now = new Date();
@@ -232,11 +262,12 @@ async function setupRotationAlarm() {
   const config = result.ssConfig || {};
 
   if (config.autoRotateFingerprint) {
-    // Check every hour if rotation is needed
-    await chrome.alarms.create('fingerprint-rotation-check', {
-      periodInMinutes: 60
-    });
-    console.log('[ShapeShift Rotation] Rotation alarm set (checks every 60 minutes)');
+    // Track the configured interval instead of a hard-coded hour, so a
+    // sub-hour rotation setting is honoured rather than delayed by up to 60 min.
+    const intervalHours = Math.max(0.5, Number(config.rotationIntervalHours) || 24);
+    const periodInMinutes = Math.max(1, Math.round(intervalHours * 60));
+    await chrome.alarms.create('fingerprint-rotation-check', { periodInMinutes });
+    console.log(`[ShapeShift Rotation] Rotation alarm set (checks every ${periodInMinutes} minutes)`);
   }
 }
 
@@ -266,29 +297,42 @@ async function rotateFingerprintNow() {
 
     console.log('[ShapeShift Rotation] Fingerprint rotated successfully');
 
-    // Reload all tabs to apply new fingerprint
-    const tabs = await chrome.tabs.query({});
-    for (const tab of tabs) {
-      if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-        try {
-          await chrome.tabs.reload(tab.id);
-        } catch (e) {
-          // Tab might not be reloadable, skip
+    // Both side effects are opt-in (Security 3): a background rotation used to
+    // reload every open tab and raise an OS notification unconditionally, which
+    // is invasive and impossible to decline. Read the switches here rather than
+    // at the call sites so every rotation path honours them.
+    const cfgResult = await chrome.storage.local.get(['ssConfig']);
+    const cfg = cfgResult.ssConfig || {};
+
+    // Reload open http(s) tabs so they pick up the new identity. Only the pages
+    // the extension actually protects are touched; chrome:// and other
+    // privileged surfaces are left alone.
+    if (cfg.reloadTabsOnRotation !== false) {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+          try {
+            await chrome.tabs.reload(tab.id);
+          } catch (e) {
+            // Tab might not be reloadable, skip
+          }
         }
       }
     }
 
     // Send notification
-    try {
-      await chrome.notifications.create({
-        type: 'basic',
-        iconUrl: chrome.runtime.getURL('images/icon128.jpg'),
-        title: 'Fingerprint Rotated',
-        message: 'Your browser fingerprint has been automatically rotated.',
-        priority: 1
-      });
-    } catch (e) {
-      // Notifications might not be available
+    if (cfg.notifyOnRotation !== false) {
+      try {
+        await chrome.notifications.create({
+          type: 'basic',
+          iconUrl: chrome.runtime.getURL('images/icon128.png'),
+          title: 'Fingerprint Rotated',
+          message: 'Your browser fingerprint has been automatically rotated.',
+          priority: 1
+        });
+      } catch (e) {
+        // Notifications might not be available
+      }
     }
   } catch (error) {
     console.error('[ShapeShift Rotation] Failed to rotate fingerprint:', error);
@@ -310,7 +354,8 @@ async function getRotationStatus() {
     };
   }
 
-  const intervalHours = config.rotationIntervalHours || 24;
+  // Keep the status countdown consistent with the alarm that drives it.
+  const intervalHours = Math.max(0.5, Number(config.rotationIntervalHours) || 24);
   const intervalMs = intervalHours * 60 * 60 * 1000;
   const lastRotation = rotationInfo.lastRotation ? new Date(rotationInfo.lastRotation) : new Date();
   const nextRotation = new Date(lastRotation.getTime() + intervalMs);

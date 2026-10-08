@@ -5,7 +5,8 @@
 
   installers.push(function installWebRTCHooks (env) {
     if (!env || !env.config?.enableWebRTCProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('webrtc') : env.prng;
+    const { config } = env;
     const blockIPLeak = config.webrtc?.blockIPLeak !== false;
     const randomizeSDP = config.webrtc?.randomizeSDP !== false;
     const forceRelay = config.webrtc?.forceRelay === true;
@@ -87,16 +88,24 @@
             if (description && description.sdp) {
               let modifiedSdp = description.sdp;
 
-              // Block IP leak: Remove host and srflx candidates
+              // Block IP leak: drop host and srflx candidates.
+              // Replacing a whole line with '' leaves a blank line behind, which
+              // both corrupts the SDP layout and makes the before/after line
+              // count identical (so `removed` was always 0). Filter the lines
+              // out instead and count what was actually dropped.
               if (blockIPLeak) {
-                const beforeLines = modifiedSdp.split('\n').length;
-                // Remove local IP candidates (typ host)
-                modifiedSdp = modifiedSdp.replace(/^a=candidate:.*typ host.*$/gm, '');
-                // Remove server reflexive candidates (typ srflx) - can leak real IP
-                modifiedSdp = modifiedSdp.replace(/^a=candidate:.*typ srflx.*$/gm, '');
-                const afterLines = modifiedSdp.split('\n').length;
-                const removed = beforeLines - afterLines;
+                const lines = modifiedSdp.split('\n');
+                const kept = [];
+                let removed = 0;
+                for (const line of lines) {
+                  if (/^a=candidate:/.test(line) && (/ typ host( |$)/.test(line) || / typ srflx( |$)/.test(line))) {
+                    removed++;
+                    continue;
+                  }
+                  kept.push(line);
+                }
                 if (removed > 0) {
+                  modifiedSdp = kept.join('\n');
                   log(`[shapeshift][webrtc] Removed ${removed} candidate lines to prevent IP leak`);
                 }
               }
@@ -242,14 +251,18 @@
               return devices;
             }
 
-            // Hash function for deterministic device ID generation
+            // Deterministic 32-bit FNV-1a style hash. The previous version used
+            // `hash = hash & hash` (a no-op) and then Math.abs(), which collided
+            // on the sign bit and produced a different value for negative hashes.
+            // Force unsigned with >>> 0 so the output is stable and collision-free
+            // across the full 32-bit space.
             function hashDeviceId(deviceId, seed) {
-              let hash = seed;
+              let hash = (seed >>> 0) || 0x811c9dc5;
               for (let i = 0; i < deviceId.length; i++) {
-                hash = ((hash << 5) - hash) + deviceId.charCodeAt(i);
-                hash = hash & hash; // Convert to 32-bit integer
+                hash ^= deviceId.charCodeAt(i);
+                hash = Math.imul(hash, 0x01000193) >>> 0;
               }
-              return Math.abs(hash).toString(16);
+              return hash.toString(16).padStart(8, '0');
             }
 
             const modifiedDevices = devices.map((device, index) => {

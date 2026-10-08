@@ -43,21 +43,151 @@
     };
   }
 
+  // FNV-1a hash, identical to core/hash.js. MAIN world does not load the core
+  // files, so the same derivation is inlined here to keep per-surface noise
+  // stable across reads and consistent with the ISOLATED hooks.
+  function hashString(str) {
+    let h1 = 0x811C9DC5;
+    const s = String(str);
+    for (let i = 0; i < s.length; i++) {
+      h1 ^= s.charCodeAt(i);
+      h1 = Math.imul(h1, 0x01000193);
+      h1 >>>= 0;
+    }
+    return h1 >>> 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Config sanitation (P0 1.6 / Security 3).
+  //
+  // The MAIN world cannot authenticate a window message: a genuine bootstrap
+  // post and a page script's post look identical (event.source is the window
+  // in both cases) and the page can read every field the injector receives.
+  // Two guards keep that from being exploitable:
+  //   1. a one-shot latch, so hooks install exactly once and a later forged
+  //      message can never re-install them or swap the seed; and
+  //   2. this whitelist, so even a forged *first* message can only choose from
+  //      known keys with clamped magnitudes instead of injecting arbitrary
+  //      properties into the hook installers.
+  // The seed is deliberately not treated as a secret: it is only an input to
+  // values the page can already read back through the hooked APIs.
+  // -------------------------------------------------------------------------
+  const CONFIG_BOUNDS = {
+    canvasNoiseStrength: [0, 10],
+    webglJitter: [0, 10],
+    audioNoiseStrength: [0, 1],
+    kdfIterations: [1, 100000],
+    rotationIntervalHours: [0.5, 8760]
+  };
+  const CONFIG_BOOLEAN_KEYS = [
+    'debug', 'enableCanvasNoise', 'enableWebGLMasking', 'maskWebGLVendorStrings',
+    'shuffleWebGLExtensions', 'enableAudioNoise', 'enableNavigatorFuzz',
+    'perOriginFingerprint', 'enableWebRTCProtection', 'enableMediaDeviceProtection',
+    'enableScreenProtection', 'enableFontProtection', 'enableTimezoneProtection',
+    'enableSensorProtection', 'enableTouchProtection', 'enableUserAgentProtection',
+    'enableMediaProtection', 'enableGeolocationProtection', 'enableDetectionResistance',
+    'useStrongKDF', 'useGaussianNoise', 'autoRotateFingerprint', 'rotateOnStartup'
+  ];
+  const CONFIG_GROUP_KEYS = [
+    'navigator', 'webrtc', 'mediaDevices', 'screen', 'sensors', 'geolocation'
+  ];
+
+  function sanitizeConfig(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const out = {};
+    for (let i = 0; i < CONFIG_BOOLEAN_KEYS.length; i++) {
+      const key = CONFIG_BOOLEAN_KEYS[i];
+      if (typeof raw[key] === 'boolean') out[key] = raw[key];
+    }
+    for (const key in CONFIG_BOUNDS) {
+      const value = raw[key];
+      if (typeof value !== 'number' || !isFinite(value)) continue;
+      const bounds = CONFIG_BOUNDS[key];
+      out[key] = Math.min(bounds[1], Math.max(bounds[0], value));
+    }
+    for (let i = 0; i < CONFIG_GROUP_KEYS.length; i++) {
+      const group = CONFIG_GROUP_KEYS[i];
+      const value = raw[group];
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const copy = {};
+      for (const gk in value) {
+        const gv = value[gk];
+        if (typeof gv === 'boolean' || (typeof gv === 'number' && isFinite(gv))) copy[gk] = gv;
+      }
+      out[group] = copy;
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Handshake nonce (P0 1.6 / Security §3).
+  //
+  // A window message cannot be authenticated, but it CAN be made
+  // unpredictable: this script runs at document_start, before any page script,
+  // and publishes READY (with a fresh per-load nonce) on its very first
+  // synchronous turn. A page script that registers a listener afterwards has
+  // missed it. SS_INIT_PAGE_HOOKS is then refused unless it echoes that nonce,
+  // so an inline page script can no longer beat the genuine bootstrap message
+  // to the one-shot latch and install hooks with a poisoned seed.
+  // -------------------------------------------------------------------------
+  const ssNonce = (function () {
+    try {
+      const cryptoObj = window.crypto || window.msCrypto;
+      if (!cryptoObj || !cryptoObj.getRandomValues) return null;
+      const buf = new Uint8Array(16);
+      cryptoObj.getRandomValues(buf);
+      let hex = '';
+      for (let i = 0; i < buf.length; i++) hex += buf[i].toString(16).padStart(2, '0');
+      return hex;
+    } catch (e) {
+      return null;
+    }
+  })();
+  const ssNonceRequired = typeof ssNonce === 'string' && ssNonce.length === 32;
+
+  function announceReady() {
+    window.postMessage({
+      type: 'SS_PAGE_WORLD_READY',
+      protocol: 1,
+      nonce: ssNonce
+    }, location.origin);
+  }
+
+  // Publish the nonce now, while no page script exists yet, and again on
+  // request in case the ISOLATED bootstrap registered its listener late.
+  announceReady();
+
   // Listen for config from ISOLATED world
+  let ssInitialized = false;
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
-    if (!event.data || event.data.type !== 'SS_INIT_PAGE_HOOKS') return;
+    if (event.origin !== location.origin) return;
+    if (!event.data) return;
+    if (event.data.type === 'SS_PAGE_WORLD_HELLO') {
+      if (event.data.protocol !== 1) return;
+      announceReady();
+      return;
+    }
+    if (event.data.type !== 'SS_INIT_PAGE_HOOKS') return;
+    if (event.data.protocol !== 1) return;
+    if (ssNonceRequired && event.data.nonce !== ssNonce) return;
+    if (ssInitialized) return; // Guard against page-forged re-init
 
-    const { config, seed } = event.data;
+    // Validate BEFORE flipping the one-shot guard: a malformed first message
+    // used to latch ssInitialized, so the genuine bootstrap message that
+    // followed was ignored and no MAIN-world hook ever installed.
+    const config = sanitizeConfig(event.data.config);
+    const seed = event.data.seed;
+    if (!config || typeof seed !== 'number' || !isFinite(seed)) {
+      return;
+    }
+
+    ssInitialized = true;
+
     const debug = config.debug || false;
     const log = debug ? console.log.bind(console) : () => {};
 
     log('[shapeshift][page] Initializing page-world hooks with config:', config);
-
-    if (!config || typeof seed !== 'number') {
-      log('[shapeshift][page] Invalid config or seed, aborting');
-      return;
-    }
 
     const prng = createPRNG(seed);
 
@@ -88,18 +218,29 @@
     // ========================================================================
     if (config.enableCanvasNoise) {
       try {
-        const noiseStrength = config.canvasNoiseStrength ?? 0.6;
+        // Must match core/config.js (canvasNoiseStrength: 2) and the ISOLATED
+        // hooks so both worlds apply the same magnitude.
+        const noiseStrength = config.canvasNoiseStrength ?? 2;
+        const canvasSeed = seed >>> 0;
         const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
         const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
         const origToBlob = HTMLCanvasElement.prototype.toBlob;
+
+        // Per-byte noise keyed on (seed, index) so two reads of the same canvas
+        // return identical pixels. A streaming PRNG would change on every read,
+        // which is itself a detectable signal.
+        function pixelNoise(index) {
+          const h = hashString(canvasSeed + ':' + index);
+          return ((h / 4294967296) - 0.5) * noiseStrength;
+        }
 
         function noisedImageData(ctx, x, y, w, h) {
           const imgData = origGetImageData.call(ctx, x, y, w, h);
           const data = imgData.data;
           for (let i = 0; i < data.length; i += 4) {
-            data[i] += noise(noiseStrength);
-            data[i + 1] += noise(noiseStrength);
-            data[i + 2] += noise(noiseStrength);
+            data[i] += pixelNoise(i);
+            data[i + 1] += pixelNoise(i + 1);
+            data[i + 2] += pixelNoise(i + 2);
           }
           return imgData;
         }
@@ -108,26 +249,74 @@
           return noisedImageData(this, x, y, w, h);
         };
 
+        // Export helpers: noised pixels must only exist for the duration of the
+        // export. Writing them into the backing store permanently mutated the
+        // canvas, so a second toDataURL()/toBlob() stacked noise on top of the
+        // already-noised pixels and the canvas the page sees drifted from the
+        // one it drew. Snapshot, noised copy, export, restore.
+        function noisedCopyOf(ctx, width, height) {
+          const original = origGetImageData.call(ctx, 0, 0, width, height);
+          const copy = ctx.createImageData(original.width, original.height);
+          copy.data.set(original.data);
+          for (let i = 0; i < copy.data.length; i += 4) {
+            copy.data[i] += pixelNoise(i);
+            copy.data[i + 1] += pixelNoise(i + 1);
+            copy.data[i + 2] += pixelNoise(i + 2);
+          }
+          return { original: original, noised: copy };
+        }
+
         HTMLCanvasElement.prototype.toDataURL = function() {
+          let snapshot = null;
+          let ctx = null;
           try {
-            const ctx = this.getContext('2d', { willReadFrequently: true });
-            if (ctx) {
-              const imgData = noisedImageData(ctx, 0, 0, this.width, this.height);
-              ctx.putImageData(imgData, 0, 0);
+            ctx = this.getContext('2d', { willReadFrequently: true });
+            if (ctx && origGetImageData) {
+              snapshot = noisedCopyOf(ctx, this.width, this.height);
+              ctx.putImageData(snapshot.noised, 0, 0);
             }
           } catch (e) { /* ignore */ }
-          return origToDataURL.apply(this, arguments);
+          try {
+            return origToDataURL.apply(this, arguments);
+          } finally {
+            if (ctx && snapshot) {
+              try { ctx.putImageData(snapshot.original, 0, 0); } catch (e) { /* ignore */ }
+            }
+          }
         };
 
         HTMLCanvasElement.prototype.toBlob = function() {
+          const args = arguments;
+          const canvas = this;
+          const restore = function () {
+            if (canvas.__ssCtx && canvas.__ssSnapshot) {
+              try { canvas.__ssCtx.putImageData(canvas.__ssSnapshot, 0, 0); } catch (e) { /* ignore */ }
+            }
+            canvas.__ssCtx = null;
+            canvas.__ssSnapshot = null;
+          };
           try {
             const ctx = this.getContext('2d', { willReadFrequently: true });
-            if (ctx) {
-              const imgData = noisedImageData(ctx, 0, 0, this.width, this.height);
-              ctx.putImageData(imgData, 0, 0);
+            if (ctx && origGetImageData) {
+              const snapshot = noisedCopyOf(ctx, this.width, this.height);
+              this.__ssCtx = ctx;
+              this.__ssSnapshot = snapshot.original;
+              ctx.putImageData(snapshot.noised, 0, 0);
             }
           } catch (e) { /* ignore */ }
-          return origToBlob.apply(this, arguments);
+          // Restore after the callback runs: toBlob is asynchronous, so the
+          // backing store must stay noised until the encoder has read it.
+          const wrappedCallback = typeof args[0] === 'function'
+            ? function (blob) { restore(); return args[0](blob); }
+            : undefined;
+          try {
+            return wrappedCallback
+              ? origToBlob.call(this, wrappedCallback, args[1])
+              : origToBlob.apply(this, args);
+          } catch (e) {
+            restore();
+            throw e;
+          }
         };
 
         log('[shapeshift][page][canvas] Hooks installed');
@@ -179,7 +368,7 @@
             Object.defineProperty(obj, prop, {
               get: getter,
               enumerable: true,
-              configurable: false
+              configurable: true
             });
           } catch (e) {
             log(`[shapeshift][page][screen] Failed to define ${prop}:`, e.message);
@@ -212,11 +401,14 @@
         const fuzzedConcurrency = Math.max(2, realHardwareConcurrency + Math.floor((prng() - 0.5) * 4));
         const fuzzedMemory = Math.max(4, realDeviceMemory + Math.floor((prng() - 0.5) * 4));
 
+        // configurable: true so a later stage (or a user re-init) can redefine
+        // the property; a non-configurable descriptor here permanently blocked
+        // every other hook from touching deviceMemory.
         if (config.navigator?.fuzzHardwareConcurrency !== false) {
           Object.defineProperty(navigator, 'hardwareConcurrency', {
             get: () => fuzzedConcurrency,
             enumerable: true,
-            configurable: false
+            configurable: true
           });
         }
 
@@ -224,7 +416,7 @@
           Object.defineProperty(navigator, 'deviceMemory', {
             get: () => fuzzedMemory,
             enumerable: true,
-            configurable: false
+            configurable: true
           });
         }
 
@@ -327,6 +519,7 @@
       try {
         const jitter = config.webglJitter ?? 2;
         const maskVendors = config.maskWebGLVendorStrings !== false;
+        const shuffleExt = config.shuffleWebGLExtensions !== false;
 
         function patchWebGL(proto) {
           if (!proto || !proto.getParameter) return;
@@ -349,11 +542,27 @@
 
             if (maskVendors && vendorParams.includes(p) && typeof value === 'string') {
               const suffix = (Math.floor(prng() * 0xFFFF) || 1) >>> 0;
-              return value + ' (fp-' + suffix + ')';
+              return value + ' (ss-' + suffix + ')';
             }
 
             return value;
           };
+
+          // Extension shuffling lives here (P1 2.23 / Security 3). It used to be
+          // applied by a second, separately injected page-world script that
+          // wrapped these same prototypes a second time, so numeric parameters
+          // were jittered twice and the suffix was applied on top of an already
+          // suffixed string. One patch site, one jitter.
+          if (proto.getSupportedExtensions && shuffleExt) {
+            const origGetSupportedExtensions = proto.getSupportedExtensions;
+            proto.getSupportedExtensions = function () {
+              const list = origGetSupportedExtensions.call(this);
+              if (Array.isArray(list)) {
+                return list.slice().reverse();
+              }
+              return list;
+            };
+          }
         }
 
         if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
@@ -374,13 +583,19 @@
         const AudioContext = window.AudioContext || window.webkitAudioContext;
 
         if (AudioContext) {
+          const audioSeed = seed >>> 0;
           const origGetChannelData = AudioBuffer.prototype.getChannelData;
           AudioBuffer.prototype.getChannelData = function(channel) {
             const data = origGetChannelData.call(this, channel);
+            // Copy first: the native call returns the buffer's live Float32Array,
+            // so writing into it corrupted the real audio samples and made the
+            // noise accumulate on every read.
+            const copy = new Float32Array(data.length);
             for (let i = 0; i < data.length; i++) {
-              data[i] += noise(audioNoiseStrength);
+              const h = hashString(audioSeed + ':a:' + i);
+              copy[i] = data[i] + ((h / 4294967296) - 0.5) * audioNoiseStrength;
             }
-            return data;
+            return copy;
           };
 
           log('[shapeshift][page][audio] Hooks installed');
@@ -391,8 +606,12 @@
     }
 
     log('[shapeshift][page] All hooks installed successfully');
-  }, { once: false }); // Allow multiple messages
+  }, { once: true }); // One-shot: a second SS_INIT_PAGE_HOOKS must never re-install
+                      // hooks or swap the seed the page already received.
 
-  // Signal that page-world script is ready
-  window.postMessage({ type: 'FP_PAGE_WORLD_READY' }, '*');
+  // Re-announce readiness (with the nonce) once all hooks are installed. The
+  // first announcement already ran synchronously at document_start; this second
+  // one covers the case where the ISOLATED bootstrap registered its listener
+  // only after that turn.
+  announceReady();
 })();

@@ -5,7 +5,8 @@
 
   installers.push(function installSensorHooks (env) {
     if (!env || !env.config?.enableSensorProtection) return;
-    const { prng, noise, config } = env;
+    const prng = env.prngFor ? env.prngFor('sensors') : env.prng;
+    const { noise, config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -37,22 +38,24 @@
 
           const battery = await origGetBattery.call(this);
 
-          // Create proxy to modify battery properties
-          const spoofedBattery = {
-            charging: battery.charging,
-            chargingTime: Infinity,
-            dischargingTime: Infinity,
-            level: Math.max(0.5, Math.min(1.0, 0.75 + noise(0.1))), // Random level around 75%
-            onchargingchange: battery.onchargingchange,
-            onchargingtimechange: battery.onchargingtimechange,
-            ondischargingtimechange: battery.ondischargingtimechange,
-            onlevelchange: battery.onlevelchange,
-            addEventListener: battery.addEventListener.bind(battery),
-            removeEventListener: battery.removeEventListener.bind(battery),
-            dispatchEvent: battery.dispatchEvent.bind(battery)
-          };
+          // Return a Proxy over the real BatteryManager so the brand, prototype,
+          // event-target identity and the other listeners stay intact. A plain
+          // object literal failed `instanceof BatteryManager` and dropped every
+          // property this file did not enumerate by hand.
+          const spoofedLevel = Math.max(0.5, Math.min(1.0, 0.75 + noise(0.1)));
+          const spoofedBattery = new Proxy(battery, {
+            get (target, prop, receiver) {
+              if (prop === 'level') return spoofedLevel;
+              if (prop === 'chargingTime') return 0;
+              if (prop === 'dischargingTime') return Infinity;
+              const value = Reflect.get(target, prop, receiver);
+              // Bind methods to the real object so `this` is never the Proxy,
+              // which would raise Illegal invocation on native accessors.
+              return typeof value === 'function' ? value.bind(target) : value;
+            }
+          });
 
-          log('[shapeshift][sensors] Battery API spoofed, level:', spoofedBattery.level.toFixed(2));
+          log('[shapeshift][sensors] Battery API spoofed, level:', spoofedLevel.toFixed(2));
           return spoofedBattery;
         };
 
@@ -102,20 +105,19 @@
       }
     });
 
-    // Performance.now() - add subtle jitter to prevent high-resolution timing
+    // Performance.now() - add bounded jitter to prevent high-resolution timing.
+    // The offset must NOT accumulate: a running total drifts away from the real
+    // clock without limit and eventually breaks any page that measures elapsed
+    // time. Jitter each reading around the true value instead.
     safeWrap(() => {
       const origNow = performance.now;
       if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origNow)) {
         globalThis.ssStealth.markPatched(origNow);
 
-        let timeOffset = 0;
         performance.now = function () {
           const realTime = origNow.call(this);
-
-          // Add cumulative jitter (0-0.1ms per call)
-          timeOffset += prng() * 0.1;
-
-          return realTime + timeOffset;
+          // Sub-millisecond, zero-mean jitter that cannot accumulate.
+          return realTime + (prng() - 0.5) * 0.1;
         };
 
         log('[shapeshift][sensors] performance.now hooked');
@@ -210,29 +212,56 @@
       }
     });
 
-    // Plugin enumeration (legacy, but still used)
+    // Plugin enumeration (legacy, but still used).
+    // Returning a bare { length: 0 } is trivially detected: real PluginArray and
+    // MimeTypeArray expose item(), namedItem() and iteration. Empty the real
+    // objects instead, which keeps the prototype and brand intact.
     safeWrap(() => {
-      // Return empty plugin list
       try {
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => {
-            if (globalThis.ssTimingUtils) {
-              globalThis.ssTimingUtils.randomDelaySync();
-            }
-            // Return empty array-like object
-            return { length: 0 };
+        const realPlugins = navigator.plugins;
+        const realMimeTypes = navigator.mimeTypes;
+
+        const defineEmptyArrayLike = (target, value) => {
+          Object.defineProperty(target, value, {
+            get: () => value === 'plugins' ? realPlugins : realMimeTypes,
+            enumerable: true,
+            configurable: true
+          });
+        };
+
+        // Chrome's PluginArray is not constructible, so shadow the two
+        // properties with the genuine objects but suppress their contents by
+        // returning the empty native-like view via a Proxy.
+        const emptyPlugins = new Proxy(realPlugins, {
+          get (t, prop) {
+            if (prop === 'length') return 0;
+            if (prop === 'item' || prop === 'namedItem') return () => null;
+            if (prop === Symbol.iterator) return function* () {};
+            const v = Reflect.get(t, prop, t);
+            return typeof v === 'function' ? v.bind(t) : v;
           },
+          has () { return false; }
+        });
+
+        const emptyMimeTypes = new Proxy(realMimeTypes, {
+          get (t, prop) {
+            if (prop === 'length') return 0;
+            if (prop === 'item' || prop === 'namedItem') return () => null;
+            if (prop === Symbol.iterator) return function* () {};
+            const v = Reflect.get(t, prop, t);
+            return typeof v === 'function' ? v.bind(t) : v;
+          },
+          has () { return false; }
+        });
+
+        defineEmptyArrayLike(navigator, 'plugins');
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => emptyPlugins,
           enumerable: true,
           configurable: true
         });
-
         Object.defineProperty(navigator, 'mimeTypes', {
-          get: () => {
-            if (globalThis.ssTimingUtils) {
-              globalThis.ssTimingUtils.randomDelaySync();
-            }
-            return { length: 0 };
-          },
+          get: () => emptyMimeTypes,
           enumerable: true,
           configurable: true
         });

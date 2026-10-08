@@ -5,7 +5,8 @@
 
   installers.push(function installScreenHooks (env) {
     if (!env || !env.config?.enableScreenProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('screen') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -97,7 +98,7 @@
               return getter.call(this);
             },
             enumerable: true,
-            configurable: false
+            configurable: true
           });
         } catch (e) {
           log(`[shapeshift][screen] Failed to define ${prop}:`, e.message);
@@ -129,19 +130,12 @@
         });
       }
 
-      // Inner/outer width and height should be consistent with screen
-      // But we'll keep them close to actual to avoid breaking layouts
-      const innerWidthBase = window.innerWidth;
-      const innerHeightBase = window.innerHeight;
-
-      // Only modify slightly to maintain consistency
-      defineGetter(window, 'innerWidth', () => {
-        return Math.min(innerWidthBase, spoofedResolution.width);
-      });
-
-      defineGetter(window, 'innerHeight', () => {
-        return Math.min(innerHeightBase, spoofedResolution.height - availOffset);
-      });
+      // window.innerWidth/innerHeight are the live viewport of the actual
+      // window. They were previously pinned to Math.min(real, spoofedScreen),
+      // which froze responsive layouts (a resize never changed them) and made
+      // the page smaller than its own viewport whenever the spoofed screen was
+      // smaller than the real window. The viewport is not a fingerprinting
+      // surface that needs masking, so it is deliberately left untouched.
 
       log('[shapeshift][screen] Screen properties hooked successfully');
     });

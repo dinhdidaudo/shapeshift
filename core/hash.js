@@ -25,6 +25,17 @@
     return seed >>> 0;
   }
 
+  // Per-surface seed derivation (P1 2.26). A single PRNG shared by every
+  // surface meant the value a surface reported depended on how many draws the
+  // *other* surfaces had already made, so toggling one module silently shifted
+  // every other surface. Deriving an independent seed per
+  // (salt, origin, surfaceId) removes that coupling while keeping each surface
+  // deterministic on its own.
+  function deriveSurfaceSeed (baseSalt, origin, surfaceId, iterations = 64) {
+    const mixed = hashString(String(surfaceId) + "|" + String(baseSalt) + "|" + String(origin || ""));
+    return deriveStrongSeed(String(mixed), String(surfaceId), iterations);
+  }
+
   // Legacy derivation for backwards compatibility
   function deriveSeed (baseSalt, origin) {
     const saltHash = hashString(String(baseSalt));
@@ -48,4 +59,5 @@
   globalThis.ssDeriveSeed = deriveSeedWithConfig; // Use strong version by default
   globalThis.ssDeriveSeedSimple = deriveSeed; // Expose legacy for testing
   globalThis.ssDeriveStrongSeed = deriveStrongSeed; // Expose strong version directly
+  globalThis.ssDeriveSurfaceSeed = deriveSurfaceSeed; // Per-surface seed (P1 2.26)
 })();

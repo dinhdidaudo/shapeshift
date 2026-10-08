@@ -4,7 +4,8 @@
 
   installers.push(function installNavigatorHooks (env) {
     if (!env || !env.config?.enableNavigatorFuzz) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('navigator') : env.prng;
+    const { config } = env;
     const navCfg = config.navigator || {};
 
     function safeWrap (fn) {
@@ -29,9 +30,12 @@
           return getter.call(this);
         };
 
+        // configurable: true so a later stage (re-init, another surface) can
+        // redefine the property. A non-configurable descriptor here permanently
+        // blocked every other hook from touching the same navigator field.
         Object.defineProperty(obj, prop, {
           get: resistantGetter,
-          configurable: false,
+          configurable: true,
           enumerable: true
         });
       } catch (e) {

@@ -6,7 +6,8 @@
 
   installers.push(function installTimezoneHooks (env) {
     if (!env || !env.config?.enableTimezoneProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('timezone') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -110,50 +111,23 @@
           return formatter;
         };
 
-        // Preserve prototype chain
+        // Preserve the full static surface (supportedLocalesOf, formatRange,
+        // formatRangeToParts, ...) and the prototype chain. Copying only
+        // supportedLocalesOf dropped every other static method, which is itself
+        // a detectable inconsistency against the real Intl.DateTimeFormat.
+        Object.setPrototypeOf(Intl.DateTimeFormat, OrigDateTimeFormat);
         Intl.DateTimeFormat.prototype = OrigDateTimeFormat.prototype;
-        Intl.DateTimeFormat.supportedLocalesOf = OrigDateTimeFormat.supportedLocalesOf;
 
         log('[shapeshift][timezone] Intl.DateTimeFormat hooked');
       }
     });
 
-    // Hook toLocaleString and related methods
-    // These use the timezone for formatting but don't affect actual time calculations
-    safeWrap(() => {
-      const dateStringMethods = [
-        'toLocaleString',
-        'toLocaleDateString',
-        'toLocaleTimeString'
-      ];
-
-      dateStringMethods.forEach(method => {
-        const orig = Date.prototype[method];
-        if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(orig)) {
-          globalThis.ssStealth.markPatched(orig);
-
-          Date.prototype[method] = function (locales, options) {
-            if (globalThis.ssTimingUtils) {
-              globalThis.ssTimingUtils.randomDelaySync();
-            }
-
-            // Don't override timezone if user explicitly provided one
-            // Only add spoofed timezone if no timezone was specified
-            if (options && options.timeZone) {
-              // User explicitly set timezone, don't override
-              return orig.call(this, locales, options);
-            }
-
-            // No explicit timezone, use spoofed one
-            const modifiedOptions = options ? { ...options } : {};
-            modifiedOptions.timeZone = spoofedTimezone;
-
-            return orig.call(this, locales, modifiedOptions);
-          };
-        }
-      });
-
-      log('[shapeshift][timezone] Date locale methods hooked');
-    });
+    // Date.prototype.toLocaleString / toLocaleDateString / toLocaleTimeString
+    // are deliberately NOT overridden any more. Injecting a timeZone into every
+    // call rewrote date and time formatting for the whole page (calendars, time
+    // pickers, log output), and it contradicted the getTimezoneOffset() contract
+    // this file already relies on: the real offset stays real, so the formatted
+    // wall-clock time must stay real too. The zone NAME exposed through
+    // Intl.DateTimeFormat().resolvedOptions() is the surface that is spoofed.
   });
 })();

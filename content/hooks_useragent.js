@@ -5,7 +5,8 @@
 
   installers.push(function installUserAgentHooks (env) {
     if (!env || !env.config?.enableUserAgentProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('useragent') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 

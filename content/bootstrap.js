@@ -1,5 +1,45 @@
 // Bootstrap: load salt, derive seed, initialize PRNG/noise helpers.
 (function () {
+  // -------------------------------------------------------------------------
+  // MAIN-world handshake (P0 1.6 / Security §3).
+  //
+  // content/page_world_injector.js runs at document_start in the MAIN world and
+  // publishes a fresh per-load nonce with SS_PAGE_WORLD_READY. SS_INIT_PAGE_HOOKS
+  // is only honoured when it echoes that nonce, which stops a page script from
+  // beating the real bootstrap message to the injector's one-shot latch and
+  // installing hooks with a seed of its choosing.
+  //
+  // The listener is registered here, synchronously, because either content
+  // script may run first: SS_PAGE_WORLD_HELLO asks the injector to announce
+  // again in case its first READY was posted before this listener existed.
+  // -------------------------------------------------------------------------
+  let ssPageNonce = null;
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window) return;
+    if (event.origin !== location.origin) return;
+    if (!event.data || event.data.type !== 'SS_PAGE_WORLD_READY') return;
+    if (event.data.protocol !== 1) return;
+    if (typeof event.data.nonce !== 'string' || !event.data.nonce) return;
+    ssPageNonce = event.data.nonce;
+  });
+
+  // Resolves with the nonce, or null when the injector never offered one (for
+  // example when its crypto.getRandomValues was unavailable and it therefore
+  // does not require a nonce at all).
+  function waitForPageNonce (timeoutMs) {
+    return new Promise(function (resolve) {
+      let waited = 0;
+      const step = 5;
+      window.postMessage({ type: 'SS_PAGE_WORLD_HELLO', protocol: 1 }, location.origin);
+      (function poll () {
+        if (ssPageNonce || waited >= timeoutMs) return resolve(ssPageNonce);
+        waited += step;
+        setTimeout(poll, step);
+      })();
+    });
+  }
+
   const readyPromise = (async () => {
     try {
       const getSalt = globalThis.ssGetSalt;
@@ -79,19 +119,39 @@
         globalThis.ssTimingUtils.init(prng);
       }
 
-      const env = { salt, seed, prng, noise, gaussianNoise, uniformNoise, config };
+      // Independent PRNG per protected surface (P1 2.26): enabling or disabling
+      // one module must not shift the values another module reports. Each hook
+      // asks for its own stream keyed on (salt, origin, surfaceId); the shared
+      // `prng` stays for timing jitter and as a fallback.
+      const deriveSurfaceSeed = globalThis.ssDeriveSurfaceSeed;
+      const surfaceOrigin = config.perOriginFingerprint ? location.origin : '';
+      const prngFor = (surfaceId) => createPRNG(
+        deriveSurfaceSeed ? deriveSurfaceSeed(salt, surfaceOrigin, surfaceId) : seed
+      );
+
+      const env = { salt, seed, prng, prngFor, noise, gaussianNoise, uniformNoise, config };
 
       globalThis.ssPRNG = prng;
       globalThis.ssNoise = noise;
       globalThis.ssEnv = env;
 
-      // Send config to page-world injector (MAIN world)
-      // The page-world injector needs config and seed to initialize hooks
+      // Send config to page-world injector (MAIN world).
+      //
+      // A window message is observable by the page, so this channel is not a
+      // secret: the injector's one-shot latch, its config whitelist and the
+      // per-load nonce echoed below are what stop a page script from
+      // re-installing hooks or smuggling extra keys through a forged
+      // SS_INIT_PAGE_HOOKS message. `protocol` lets a future release change the
+      // payload shape without old injectors acting on a message they do not
+      // understand.
+      const pageNonce = await waitForPageNonce(500);
       window.postMessage({
         type: 'SS_INIT_PAGE_HOOKS',
+        protocol: 1,
+        nonce: pageNonce || undefined,
         config: config,
         seed: seed
-      }, '*');
+      }, location.origin);
 
       if (config.debug) {
         console.log('[shapeshift][bootstrap] Sent config to page-world injector');

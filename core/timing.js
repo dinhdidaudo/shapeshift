@@ -3,36 +3,45 @@
 // hook operations timing-resistant.
 (function () {
   let prng = null;
+  // Timing jitter is OFF by default (P1 2.14). It is invoked from every hooked
+  // getter (123 call sites), so leaving it on made each property read do extra
+  // work for a signal a site can average out anyway. Opt in with
+  // config.timingJitter = true when you are specifically testing timing.
+  let jitterEnabled = false;
 
   // Initialize with PRNG after bootstrap
   function initTimingUtils(prngFunction) {
     prng = prngFunction;
+    const config = globalThis.ssConfig || {};
+    jitterEnabled = config.timingJitter === true;
   }
 
   // Add random micro-delay (0-5ms) to prevent timing measurements
   async function randomDelay() {
-    if (!prng) return;
+    if (!prng || !jitterEnabled) return;
     const delay = Math.floor(prng() * 5); // 0-5ms
     if (delay > 0) {
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 
-  // Synchronous random delay using busy-wait (for synchronous operations)
+  // Synchronous jitter for hot synchronous code paths.
+  // Deliberately does NOT busy-wait on the clock: blocking the main thread for
+  // up to 2 ms on every getter read is a larger timing signal (and a jank
+  // source) than the jitter it was meant to hide.
   function randomDelaySync() {
-    if (!prng) return;
-    const delay = prng() * 2; // 0-2ms for sync operations
-    if (delay > 0.5) {
-      const start = performance.now();
-      while (performance.now() - start < delay) {
-        // Busy wait - prevents async scheduling timing leaks
-      }
+    if (!prng || !jitterEnabled) return;
+    const iterations = Math.floor(prng() * 32);
+    let dummy = 0;
+    for (let i = 0; i < iterations; i++) {
+      dummy += i & 1;
     }
+    return dummy;
   }
 
   // Add random execution path jitter
   function executionJitter() {
-    if (!prng) return;
+    if (!prng || !jitterEnabled) return;
     // Perform random number of no-op operations
     const iterations = Math.floor(prng() * 10);
     let dummy = 0;

@@ -1,0 +1,54 @@
+name: CI
+
+# `scripts/verify.mjs` and the unit tests are the project's only automated
+# gate. Running them on every push is what makes that gate meaningful: without
+# CI a broken hook file could land and nobody would notice until the extension
+# failed to load.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['18', '20']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies to install: the extension is plain JS with no bundler
+      # and no lockfile, so the checkout is directly runnable.
+      - name: Structural verification
+        run: node scripts/verify.mjs
+
+      - name: Lint rules
+        run: node scripts/verify.mjs --lint
+
+      - name: Unit tests
+        run: node scripts/test.mjs
+
+      - name: Build package
+        run: node scripts/build.mjs
+
+      - name: Upload dist
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shapeshift-dist
+          path: dist/
+          if-no-files-found: error

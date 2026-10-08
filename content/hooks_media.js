@@ -5,7 +5,8 @@
 
   installers.push(function installMediaHooks (env) {
     if (!env || !env.config?.enableMediaProtection) return;
-    const { prng, config } = env;
+    const prng = env.prngFor ? env.prngFor('media') : env.prng;
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 

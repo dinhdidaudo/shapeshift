@@ -6,6 +6,17 @@
     if (!env || !env.config?.enableAudioNoise) return;
     const { noise, config } = env;
     const strength = config.audioNoiseStrength ?? 1e-7;
+    const seed = (env.seed >>> 0) || 0;
+
+    // Same determinism contract as canvas: repeated getChannelData() on one
+    // AudioBuffer must return the same samples, otherwise reading twice is
+    // itself the detection signal.
+    function sampleNoise (index) {
+      const hash = globalThis.ssHashString;
+      if (!hash) return noise(strength);
+      const h = hash(seed + ':a:' + index);
+      return ((h / 4294967296) - 0.5) * strength;
+    }
 
     function safeWrap (fn) {
       try {
@@ -33,7 +44,7 @@
         const data = origGetChannelData.apply(this, arguments);
         const copy = new Float32Array(data.length);
         for (let i = 0; i < data.length; i++) {
-          copy[i] = data[i] + noise(strength);
+          copy[i] = data[i] + sampleNoise(i);
         }
 
         // Add exit jitter
