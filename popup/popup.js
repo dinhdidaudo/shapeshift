@@ -248,7 +248,7 @@ async function main () {
     });
   }
 
-  ['optionsBtn', 'optionsBtnSecondary'].forEach(function (id) {
+  ['optionsBtn'].forEach(function (id) {
     const btn = $(id);
     if (btn) btn.addEventListener('click', function () { chrome.runtime.openOptionsPage(); });
   });
