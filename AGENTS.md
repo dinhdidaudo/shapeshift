@@ -99,7 +99,12 @@ Run `npm run verify` before every commit. It is the project's only automated gat
 
 ## 9. Commit conventions
 
-- Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`.
+The full standard — types, scopes, body and footer rules, breaking changes — lives in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) section 5. The short version:
+
+- Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `perf:`, `build:`, `ci:`, `style:`, `revert:`.
 - Scope by area where useful: `feat(options): ...`, `fix(webgl): ...`.
+- Subject is imperative, lowercase, no trailing period, max 72 characters.
+- `BREAKING CHANGE:` footer plus `!` after the type for breaking changes.
 - One logical change per commit. Never commit `refers/`, `node_modules/`, or build output.
 - Keep the working tree clean: `git status` must show only intended files.

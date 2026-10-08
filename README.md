@@ -128,7 +128,7 @@ Enable verbose logging in **Settings → Advanced → Debug mode**. Console outp
 [shapeshift][page][timezone] Real offset: 480 Spoofed zone: America/Vancouver
 ```
 
-See [AGENTS.md](AGENTS.md) for the full contributor and agent guide, [BUILD.md](BUILD.md) for packaging, and [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor guide and the commit message standard, [AGENTS.md](AGENTS.md) for the full agent and architecture guide, [BUILD.md](BUILD.md) for packaging, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Testing
 

@@ -113,7 +113,7 @@ jsFiles.forEach((file) => {
 strayKeys.length === 0 ? ok('every storage key matches the contract') : fail('storage key contract', strayKeys.slice(0, 10).join(', '));
 
 section('project files');
-['README.md', 'AGENTS.md', 'LICENSE', 'CHANGELOG.md', 'BUILD.md', 'package.json', '.gitignore'].forEach((file) => {
+['README.md', 'AGENTS.md', 'CONTRIBUTING.md', 'LICENSE', 'CHANGELOG.md', 'BUILD.md', 'package.json', '.gitignore'].forEach((file) => {
   existsSync(join(ROOT, file)) ? ok(file + ' present') : fail(file + ' present');
 });
 
