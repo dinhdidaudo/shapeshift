@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
-const SKIP_DIRS = new Set(['.git', 'refers', 'node_modules', 'dist', 'scripts', 'artifacts']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'scripts', 'artifacts']);
 const EXTS = new Set(['.js', '.ts', '.html', '.css', '.json', '.md']);
 
 // Order matters: longer/more specific tokens first.

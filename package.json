@@ -2,9 +2,10 @@
   "name": "shapeshift",
   "version": "1.0.0",
   "description": "ShapeShift - per-origin browser fingerprint shaping for Chrome (MV3).",
-  "author": "dinhdidaudo",
+  "author": "Phạm Văn Định (dinhdidaudo)",
   "license": "MIT",
   "private": true,
+  "packageManager": "pnpm@10.0.0",
   "repository": {
     "type": "git",
     "url": "git@github.com:dinhdidaudo/shapeshift.git"
@@ -19,6 +20,7 @@
     "migrate": "node scripts/rename-namespace.mjs"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "pnpm": ">=9.0.0"
   }
 }

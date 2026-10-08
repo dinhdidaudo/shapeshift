@@ -7,26 +7,26 @@ files Chrome runs.
 ## Prerequisites
 
 - Node.js >= 18.0.0 (used only for the scripts in `scripts/`)
-- npm >= 9.0.0 (only to run the script shortcuts)
+- pnpm >= 9.0.0 (only to run the script shortcuts)
 
-There is nothing to `npm install`. Every script uses only the Node standard
+There is nothing to `pnpm install`. Every script uses only the Node standard
 library.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `npm run verify` | Structural + syntax gate for the whole extension. **Run before every commit.** |
-| `npm run lint` | The same gate in lint mode. |
-| `npm test` | Runs the structural gate **and** the core unit tests. |
-| `npm run build` | Runs the gate, then copies the runtime tree to `dist/`. |
-| `npm run icons` | Regenerates `images/icon*.png` (pure Node, no image libraries). |
-| `npm run migrate` | One-shot `fp*` -> `ss*` namespace migration. Idempotent. |
+| `pnpm run verify` | Structural + syntax gate for the whole extension. **Run before every commit.** |
+| `pnpm run lint` | The same gate in lint mode. |
+| `pnpm test` | Runs the structural gate **and** the core unit tests. |
+| `pnpm run build` | Runs the gate, then copies the runtime tree to `dist/`. |
+| `pnpm run icons` | Regenerates `images/icon*.png` (pure Node, no image libraries). |
+| `pnpm run migrate` | One-shot `fp*` -> `ss*` namespace migration. Idempotent. |
 
 ## Packaging
 
 ```bash
-npm run build            # -> dist/
+pnpm run build           # -> dist/
 node scripts/build.mjs --out some/other/dir
 ```
 
@@ -39,7 +39,7 @@ copies the runtime tree (`manifest.json`, `background/`, `core/`, `content/`,
 
 ### Chrome / Edge
 
-1. Run `npm run verify`.
+1. Run `pnpm run verify`.
 2. Open `chrome://extensions/`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked**.
@@ -70,7 +70,6 @@ content/                      Content scripts (ISOLATED world)
 popup/                        Toolbar popup
 options/                      Full-page settings UI
 scripts/                      Node utilities (verify, test, build, icons, migration)
-refers/                       READ-ONLY upstream reference. Never edit.
 ```
 
 ## Verification gate
@@ -80,7 +79,7 @@ refers/                       READ-ONLY upstream reference. Never edit.
 - `manifest.json` parses, uses MV3, and every referenced path exists
 - hooks load before `bootstrap.js`, and `content_main.js` loads last
 - every runtime JavaScript file parses (`node --check`)
-- no retired `fp*` identifiers outside `refers/`
+- no retired `fp*` identifiers
 - no `innerHTML` in the popup or options controllers
 - every `chrome.storage.local` key matches the documented storage contract
 - required project files are present
@@ -101,7 +100,7 @@ pins the contract that makes per-origin shaping stable:
 ### The extension does not load
 
 - Ensure `manifest.json` is at the root you selected.
-- Run `npm run verify` and fix the reported failure.
+- Run `pnpm run verify` and fix the reported failure.
 - Check the DevTools console for `[shapeshift]` errors.
 
 ### Changes not reflected

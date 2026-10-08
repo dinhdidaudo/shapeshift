@@ -159,14 +159,10 @@ This release represents a complete transformation of the extension from a basic 
   - Source maps for debugging
   - Multi-browser support (Chrome, Firefox)
   - CopyWebpackPlugin for assets
-- **NPM Scripts**
-  - `npm run build` - Production build
-  - `npm run build:dev` - Development build
-  - `npm run build:watch` - Watch mode
-  - `npm run build:firefox` - Firefox build
-  - `npm run type-check` - TypeScript validation
-  - `npm run lint` - Code linting
-  - `npm run test` - Run tests
+- **pnpm Scripts**
+  - `pnpm run build` - Production build
+  - `pnpm run lint` - Code linting
+  - `pnpm test` - Run tests
 - **Build Documentation** (`BUILD.md`)
   - Complete setup instructions
   - Development workflow guide

@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans acting like them) working in this repo
 
 ## 1. What this project is
 
-**ShapeShift** is a Chromium Manifest V3 extension that gives every website a different, stable device fingerprint. It is a ground-up rework of the `browser-fingerprint-shuffler` project (kept read-only under `refers/`), rebranded and re-skinned with a premium control-room UI.
+**ShapeShift** is a Chromium Manifest V3 extension that gives every website a different, stable device fingerprint. It is a new, independent project, created by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)). It is not a fork of, and does not reference, any other project, and it ships with a premium control-room UI.
 
 Core idea: derive a deterministic PRNG seed from `(persistent salt, page origin)` and use it to perturb fingerprinting surfaces — Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Navigator, Timezone, Sensors, Touch, Media, Geolocation, Detection.
 
@@ -30,13 +30,12 @@ content/                      Content scripts (ISOLATED world)
 popup/                        Toolbar popup — status, per-site toggle, rotation
 options/                      Full-page settings UI (the "control room")
 scripts/                      Node utilities (verify, build, icons, migration)
-refers/                       READ-ONLY upstream reference copy. Never edit.
 ```
 
 ## 3. Non-negotiable rules
 
-1. **`refers/` is read-only.** It is the upstream reference. Never run formatters, migrations, or the rename script over it. `scripts/rename-namespace.mjs` already skips it via `SKIP_DIRS`.
-2. **Namespace is `ss` / `ss`-prefixed.** The legacy `fp`-prefixed namespace from the upstream project is retired. New globals, storage keys, and message types must use the `ss` prefix.
+1. **Original work only.** ShapeShift is an independent project. Do not add copied code, attribution, or references to any third-party project, and do not introduce a `refers/` directory.
+2. **Namespace is `ss` / `ss`-prefixed.** The retired `fp`-prefixed namespace must not come back. New globals, storage keys, and message types must use the `ss` prefix.
    - Storage keys: `ssConfig`, `ss_salt`, `ss_stats`, `ss_site_settings`, `ss_rotation_info`
    - Globals: `ssConfig`, `ssPRNG`, `ssNoise`, `ssEnv`, `ssReady`, `ssStealth`, ...
    - Messages: `SS_STATS`, `SS_INIT_PAGE_HOOKS`
@@ -79,15 +78,15 @@ Absence of an origin in `ss_site_settings` means **protection is ON** for that o
 ## 7. Commands
 
 ```bash
-npm run verify        # structural + syntax check of the whole extension
-npm run lint          # same script with lint mode
-npm run test          # alias for verify
-npm run build         # package the runtime tree into dist/
-npm run icons         # regenerate images/icon*.png
-npm run migrate       # one-shot fp* -> ss* migration (idempotent)
+pnpm run verify       # structural + syntax check of the whole extension
+pnpm run lint         # same script with lint mode
+pnpm run test         # alias for verify
+pnpm run build        # package the runtime tree into dist/
+pnpm run icons        # regenerate images/icon*.png
+pnpm run migrate      # one-shot fp* -> ss* migration (idempotent)
 ```
 
-Run `npm run verify` before every commit. It is the project's only automated gate.
+Run `pnpm run verify` before every commit. It is the project's only automated gate.
 
 ## 8. Manual verification checklist
 
@@ -106,5 +105,5 @@ The full standard — types, scopes, body and footer rules, breaking changes —
 - Scope by area where useful: `feat(options): ...`, `fix(webgl): ...`.
 - Subject is imperative, lowercase, no trailing period, max 72 characters.
 - `BREAKING CHANGE:` footer plus `!` after the type for breaking changes.
-- One logical change per commit. Never commit `refers/`, `node_modules/`, or build output.
+- One logical change per commit. Never commit `node_modules/` or build output.
 - Keep the working tree clean: `git status` must show only intended files.

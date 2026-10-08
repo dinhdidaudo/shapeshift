@@ -192,7 +192,7 @@ jsFiles.concat([join(ROOT, 'manifest.json'), join(ROOT, 'README.md'), join(ROOT,
     if (bad) legacyHits.push(file.slice(ROOT.length + 1) + ':' + (i + 1));
   });
 });
-legacyHits.length === 0 ? ok('no legacy fp* identifiers outside refers/') : fail('no legacy fp* identifiers', legacyHits.slice(0, 10).join(', '));
+legacyHits.length === 0 ? ok('no legacy fp* identifiers') : fail('no legacy fp* identifiers', legacyHits.slice(0, 10).join(', '));
 
 section('UI safety');
 const innerHtmlHits = jsFiles.filter((f) => (f.indexOf('popup') !== -1 || f.indexOf('options') !== -1) && text(f).indexOf('innerHTML') !== -1);

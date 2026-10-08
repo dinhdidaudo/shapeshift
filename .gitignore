@@ -2,14 +2,10 @@
 .DS_Store
 Thumbs.db
 
-# Upstream reference copy - never committed
-refers/
-
 # Dependency caches
 node_modules/
 npm-debug.log*
 yarn-error.log*
-pnpm-lock.yaml
 package-lock.json
 
 # Build artifacts

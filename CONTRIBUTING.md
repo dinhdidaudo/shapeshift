@@ -28,7 +28,7 @@ Three rules are absolute:
 
 - **No network calls.** No `fetch`, no `XMLHttpRequest`, no analytics. The extension is fully offline.
 - **Determinism.** The same `(salt, origin, config)` must always produce the same spoofed values. Never introduce `Math.random()` or `Date.now()` into a seed-derivation path.
-- **`refers/` is read-only.** It holds the upstream reference copy. Never edit, format, or migrate it.
+- **Original work only.** ShapeShift is an independent project: do not add copied code, attribution, or references to any third-party project.
 
 ---
 
@@ -40,26 +40,26 @@ git clone git@github.com:dinhdidaudo/shapeshift.git
 cd shapeshift
 
 # 2. Verify the working tree is healthy
-npm run verify
+pnpm run verify
 
 # 3. Load it in Chrome
 #    chrome://extensions -> Developer mode -> Load unpacked -> select the repo root
 ```
 
-There are no runtime dependencies and nothing to install. `npm run verify` uses only Node's standard library.
+There are no runtime dependencies and nothing to install. `pnpm run verify` uses only Node's standard library.
 
 ### Commands
 
 | Command | What it does |
 |---|---|
-| `npm run verify` | Structural + syntax gate. **Run before every commit.** |
-| `npm run lint` | Same gate in lint mode. |
-| `npm test` | Alias for `npm run verify`. |
-| `npm run build` | Runs the gate, then packages the runtime tree into `dist/`. |
-| `npm run icons` | Regenerate `images/icon*.png`. |
-| `npm run migrate` | One-shot `fp*` -> `ss*` migration. Idempotent. |
+| `pnpm run verify` | Structural + syntax gate. **Run before every commit.** |
+| `pnpm run lint` | Same gate in lint mode. |
+| `pnpm test` | Alias for `pnpm run verify`. |
+| `pnpm run build` | Runs the gate, then packages the runtime tree into `dist/`. |
+| `pnpm run icons` | Regenerate `images/icon*.png`. |
+| `pnpm run migrate` | One-shot `fp*` -> `ss*` migration. Idempotent. |
 
-`npm run verify` is the project's only automated gate. A pull request that does not pass it will not be merged.
+`pnpm run verify` is the project's only automated gate. A pull request that does not pass it will not be merged.
 
 ---
 
@@ -73,7 +73,6 @@ content/                      Content scripts (ISOLATED world) + MAIN-world patc
 popup/                        Toolbar popup
 options/                      Full-page settings UI
 scripts/                      Node utilities (verify, build, icons, migration)
-refers/                       READ-ONLY upstream reference. Never edit.
 ```
 
 ---
@@ -83,7 +82,7 @@ refers/                       READ-ONLY upstream reference. Never edit.
 ### JavaScript
 
 - Plain ES2020+, no build step for runtime files. `scripts/` may use ES modules.
-- No `innerHTML` in `popup/` or `options/`. Build DOM with `document.createElement` and `textContent`. `npm run verify` enforces this.
+- No `innerHTML` in `popup/` or `options/`. Build DOM with `document.createElement` and `textContent`. `pnpm run verify` enforces this.
 - Register hooks through `globalThis.ssHookInstallers`; guard with `ssStealth.isPatched()` / `markPatched()`.
 - Keep patched properties non-enumerable when they shadow natives.
 - Namespace everything with `ss`: storage keys (`ssConfig`, `ss_salt`, ...), globals (`ssPRNG`, `ssEnv`, ...), message types (`SS_STATS`, ...). The legacy `fp` prefix is retired.
@@ -239,8 +238,8 @@ Co-authored-by: Nguyen Van A <a@example.com>
 ### 5.8 Commit hygiene
 
 - **One logical change per commit.** If you need the word "and" in the subject, split the commit.
-- **Never commit** `refers/`, `node_modules/`, `dist/`, `build/`, `*.zip`, or any `.env` file. `.gitignore` already covers these.
-- **Run `npm run verify` before committing.** It must print `PASS`.
+- **Never commit** `node_modules/`, `dist/`, `build/`, `*.zip`, or any `.env` file. `.gitignore` already covers these.
+- **Run `pnpm run verify` before committing.** It must print `PASS`.
 - **Keep the tree clean.** `git status` must show only files you intend to commit.
 - **Do not rewrite history on `main`.** Rebase your feature branch instead.
 
@@ -275,7 +274,7 @@ chore/drop-legacy-namespace
 
 1. Branch off `main` with a name from [section 6](#6-branch-naming).
 2. Make your change. Keep commits atomic and conventional.
-3. Run `npm run verify`. It must print `PASS - n/n checks passed`.
+3. Run `pnpm run verify`. It must print `PASS - n/n checks passed`.
 4. Complete the manual checklist in [`AGENTS.md`](AGENTS.md) section 8 for any change that touches a hook.
 5. Update `CHANGELOG.md` under an `Unreleased` heading if the change is user-visible.
 6. Open the pull request against `main`. In the description, state what changed, why, and how you verified it.
@@ -283,7 +282,7 @@ chore/drop-legacy-namespace
 
 A pull request is ready to merge when:
 
-- `npm run verify` passes.
+- `pnpm run verify` passes.
 - The manual checklist passes for hook changes.
 - Documentation is updated in the same pull request.
 - The commit history follows the standard in [section 5](#5-commit-message-standard).

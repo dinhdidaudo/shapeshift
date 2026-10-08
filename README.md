@@ -4,10 +4,10 @@
 
 **ShapeShift** gives every website a different, stable device fingerprint. It is a Manifest V3 Chromium extension that applies deterministic, per-origin noise to the APIs fingerprinters read — Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Navigator, Timezone, Sensors, Touch, Media, Geolocation and Detection surfaces.
 
-Rebuilt from `browser-fingerprint-shuffler` with a premium control-room interface: deep-space glass, aurora accents, and a live surface map.
+Built from the ground up with a premium control-room interface: deep-space glass, aurora accents, and a live surface map.
 
 - Repository: `git@github.com:dinhdidaudo/shapeshift.git`
-- Author: **dinhdidaudo**
+- Author: **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo))
 - License: MIT
 - Privacy policy: [PRIVACY.md](PRIVACY.md) · Security policy: [SECURITY.md](SECURITY.md)
 
@@ -114,12 +114,12 @@ An origin missing from `ss_site_settings` is protected; pausing is recorded expl
 ## Development
 
 ```bash
-npm run verify      # structural + syntax gate (run before every commit)
-npm run lint        # same gate in lint mode
-npm run test        # alias for verify
-npm run build       # package the runtime tree into dist/
-npm run icons       # regenerate images/icon*.png
-npm run migrate     # one-shot fp* -> ss* namespace migration (idempotent)
+pnpm run verify     # structural + syntax gate (run before every commit)
+pnpm run lint       # same gate in lint mode
+pnpm run test       # alias for verify
+pnpm run build      # package the runtime tree into dist/
+pnpm run icons      # regenerate images/icon*.png
+pnpm run migrate    # one-shot fp* -> ss* namespace migration (idempotent)
 ```
 
 Enable verbose logging in **Settings → Advanced → Debug mode**. Console output is prefixed:
@@ -176,4 +176,4 @@ MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
-Original concept and architecture by [@juu17](https://github.com/juu17). Maintained by [@dinhdidaudo](https://github.com/dinhdidaudo) as ShapeShift.
+ShapeShift is a new, independent project created and maintained by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)). It is not a fork of, and does not reference, any other project.
