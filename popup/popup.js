@@ -9,13 +9,13 @@ const DEFAULTS = globalThis.ssFlatDefaults || {};
 const MODULES = [
   { key: 'enableCanvasNoise', label: 'Canvas', icon: 'M3 3h18v18H3zM3 9h18M9 21V9' },
   { key: 'enableWebGLMasking', label: 'WebGL', icon: 'M12 2 3 7v10l9 5 9-5V7l-9-5Z' },
-  { key: 'enableAudioNoise', label: 'Audio', icon: 'M11 5 6 9H3v6h3l5 4V5Z' },
+  { key: 'enableAudioNoise', label: 'Audio', icon: 'M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2' },
   { key: 'enableWebRTCProtection', label: 'WebRTC', icon: 'M4 5h16v14H4zM9 12h6M12 9v6' },
   { key: 'enableScreenProtection', label: 'Screen', icon: 'M3 4h18v12H3zM8 20h8M12 16v4' },
   { key: 'enableFontProtection', label: 'Fonts', icon: 'M5 20 12 4l7 16M8.5 14h7' },
   { key: 'enableTimezoneProtection', label: 'Timezone', icon: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM3 12h18' },
   { key: 'enableSensorProtection', label: 'Sensors', icon: 'M4 18V9M10 18V5M16 18v-7M22 18v-3' },
-  { key: 'enableNavigatorFuzz', label: 'Navigator', icon: 'M12 2 2 7l10 5 10-5-10-5Z' },
+  { key: 'enableNavigatorFuzz', label: 'Navigator', icon: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM15.6 8.4l-2.3 5.2-5.2 2.3 2.3-5.2 5.2-2.3Z' },
   { key: 'enableGeolocationProtection', label: 'Geolocation', icon: 'M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11Z' }
 ];
 

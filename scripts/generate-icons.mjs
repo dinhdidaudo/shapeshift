@@ -1,17 +1,29 @@
-// ShapeShift - regenerate images/icon*.png with zero dependencies.
+// ShapeShift - regenerate images/icon*.png and images/logo.svg.
 // Usage: node scripts/generate-icons.mjs
 //
-// Draws the unified ShapeShift mark: a rounded obsidian tile with an aurora
-// gradient and the two-triangle "shift" glyph used by the popup and the
-// control room. Writes real PNG files using only node:zlib.
+// The canonical mark lives in scripts/brand-spec.mjs. This script rasterises
+// that exact geometry and writes the SVG master from the same string, so the
+// toolbar icon, the popup, the control room and the README cannot drift apart.
+// PNG bytes come from node:zlib alone - no image dependency, nothing fetched.
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MARK, AURORA, markSvg } from './brand-spec.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT_DIR = join(ROOT, 'images');
-const SIZES = [16, 32, 48, 128];
+
+// icon.png is the store/readme master (not referenced by manifest.json); the
+// numbered sizes are what the manifest loads.
+const OUTPUTS = [
+  ['icon.png', 256],
+  ['icon16.png', 16],
+  ['icon32.png', 32],
+  ['icon48.png', 48],
+  ['icon128.png', 128]
+];
+const LOGO = ['logo.svg', 128];
 
 // --- PNG encoding -----------------------------------------------------------
 
@@ -71,73 +83,110 @@ function mix (a, b, t) {
   return a + (b - a) * t;
 }
 
-// Aurora ramp: sky -> indigo -> violet, matching --edge in both stylesheets.
-function aurora (t) {
-  const clamped = Math.max(0, Math.min(1, t));
-  if (clamped < 0.55) {
-    const k = clamped / 0.55;
-    return [mix(0x7D, 0x6D, k), mix(0xD3, 0x8B, k), mix(0xFC, 0xFF, k)];
-  }
-  const k = (clamped - 0.55) / 0.45;
-  return [mix(0x6D, 0xA7, k), mix(0x8B, 0x8B, k), mix(0xFF, 0xFA, k)];
+function hexToRgb (hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16)
+  ];
 }
 
-// Barycentric coverage for the triangle (x1,y1)-(x2,y2)-(x3,y3) at (px,py).
-function triCoverage (px, py, x1, y1, x2, y2, x3, y3) {
-  const d1 = (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2);
-  const d2 = (px - x3) * (y2 - y3) - (x2 - x3) * (py - y3);
-  const d3 = (px - x1) * (y3 - y1) - (x3 - x1) * (py - y1);
-  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
-  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
-  return hasNeg && hasPos ? 0 : 1;
+// Same stops, same order, same ramp as the SVG gradient.
+const RAMP = AURORA.map((stop) => ({ at: Number(stop.offset), rgb: hexToRgb(stop.color) }));
+
+function aurora (t) {
+  const v = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < RAMP.length; i++) {
+    const a = RAMP[i - 1];
+    const b = RAMP[i];
+    if (v <= b.at || i === RAMP.length - 1) {
+      const k = b.at === a.at ? 0 : (v - a.at) / (b.at - a.at);
+      return [
+        mix(a.rgb[0], b.rgb[0], k),
+        mix(a.rgb[1], b.rgb[1], k),
+        mix(a.rgb[2], b.rgb[2], k)
+      ];
+    }
+  }
+  return RAMP[RAMP.length - 1].rgb;
+}
+
+// Signed distance to a rounded rectangle centred on the origin.
+function roundRectSdf (px, py, hw, hh, r) {
+  const dx = Math.abs(px) - (hw - r);
+  const dy = Math.abs(py) - (hh - r);
+  return Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0) - r;
+}
+
+// Rotate the sample into the frame's local axes, then measure the square.
+function frameSdf (px, py, half, r) {
+  const a = (-MARK.square.rotation * Math.PI) / 180;
+  const dx = px - MARK.size;
+  const dy = py - MARK.size;
+  const lx = dx * Math.cos(a) - dy * Math.sin(a);
+  const ly = dx * Math.sin(a) + dy * Math.cos(a);
+  return roundRectSdf(lx, ly, half, half, r);
+}
+
+// Coverage of a shape from its signed distance (1 px antialiasing band).
+function coverage (sdf) {
+  return Math.max(0, Math.min(1, 0.5 - sdf));
 }
 
 function drawIcon (size) {
   const rgba = Buffer.alloc(size * size * 4);
-  const s = size;
-  const radius = s * 0.23;
+  const unit = size / MARK.viewBox;
+  const tileR = size * MARK.tileRadiusRatio;
+  const half = size / 2;
 
-  // The mark occupies the middle of the tile, matching the SVG's 32x32 box.
-  const unit = s / 32;
-  const up = [19, 3.4, 30.6, 14.6, 7.4, 14.6];          // upper triangle
-  const down = [13, 28.6, 1.4, 17.4, 24.6, 17.4];        // lower triangle
+  const s = MARK.square;
+  const outerHalf = s.half + MARK.stroke / 2;
+  const innerHalf = s.half - MARK.stroke / 2;
+  const outerR = s.radius + MARK.stroke / 2;
+  const innerR = Math.max(s.radius - MARK.stroke / 2, 0.2);
+  const coreR = MARK.core.r;
 
-  for (let y = 0; y < s; y++) {
-    for (let x = 0; x < s; x++) {
-      const i = (y * s + x) * 4;
+  // The SVG gradient runs corner to corner across (4,4)-(28,28).
+  const rampSpan = 48;
 
-      // Rounded-square mask with antialiasing.
-      const dx = Math.max(radius - x, x - (s - 1 - radius), 0);
-      const dy = Math.max(radius - y, y - (s - 1 - radius), 0);
-      const corner = Math.sqrt(dx * dx + dy * dy);
-      const alpha = Math.max(0, Math.min(1, radius - corner + 0.5));
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+
+      // Obsidian rounded tile, antialiased.
+      const tile = roundRectSdf(x + 0.5 - half, y + 0.5 - half, half, half, tileR);
+      const alpha = coverage(tile);
       if (alpha <= 0) continue;
 
-      // Obsidian base: near-black navy with a faint indigo lift top-left.
-      const t = (x + y) / (2 * s);
-      let r = mix(0x08, 0x0D, t);
-      let g = mix(0x0C, 0x12, t);
-      let b = mix(0x18, 0x24, t);
+      // Base: --bg-0 lifted along the diagonal so the tile never reads flat.
+      const t = (x + y) / (2 * size);
+      let r = mix(0x07, 0x0D, t);
+      let g = mix(0x0A, 0x12, t);
+      let b = mix(0x17, 0x24, t);
 
-      // Glyph pixels, sampled in the 32x32 design space.
       const ux = (x + 0.5) / unit;
       const uy = (y + 0.5) / unit;
-      const inUp = triCoverage(ux, uy, up[0], up[1], up[2], up[3], up[4], up[5]);
-      const inDown = triCoverage(ux, uy, down[0], down[1], down[2], down[3], down[4], down[5]);
+      const ramp = (ux + uy - 8) / rampSpan;
 
-      if (inUp || inDown) {
-        // Gradient runs along the mark's own diagonal, like the SVG.
-        const ramp = Math.max(0, Math.min(1, (ux + uy) / 32));
-        const [ar, ag, ab] = aurora(ramp * 1.15);
-        const strength = inUp ? 1 : 0.58;  // lower triangle is the faded twin
-        r = mix(r, ar, strength);
-        g = mix(g, ag, strength);
-        b = mix(b, ab, strength);
-      } else {
-        // Subtle aurora bloom behind the glyph so the tile never reads flat.
-        const bloom = Math.max(0, 1 - Math.hypot(ux - 16, uy - 16) / 18) ** 2 * 0.22;
+      // Frame = outer rounded square minus the inner one, matching the SVG
+      // stroke centred on the path.
+      const ring = Math.max(0,
+        coverage(frameSdf(ux, uy, outerHalf, outerR) * unit) -
+        coverage(frameSdf(ux, uy, innerHalf, innerR) * unit));
+      const core = coverage((Math.hypot(ux - MARK.size, uy - MARK.size) - coreR) * unit);
+      const glyph = Math.max(ring, core);
+
+      if (glyph > 0) {
+        const [ar, ag, ab] = aurora(ramp);
+        r = mix(r, ar, glyph);
+        g = mix(g, ag, glyph);
+        b = mix(b, ab, glyph);
+      } else if (size >= 48) {
+        // Faint aurora bloom behind the mark. Skipped on the toolbar sizes,
+        // where it only muddies the 16 px silhouette.
+        const bloom = Math.max(0, 1 - Math.hypot(ux - MARK.size, uy - MARK.size) / 15) ** 2 * 0.16;
         if (bloom > 0) {
-          const [ar, ag, ab] = aurora((ux + uy) / 32);
+          const [ar, ag, ab] = aurora(ramp);
           r = mix(r, ar, bloom);
           g = mix(g, ag, bloom);
           b = mix(b, ab, bloom);
@@ -156,9 +205,14 @@ function drawIcon (size) {
 // --- main -------------------------------------------------------------------
 
 mkdirSync(OUT_DIR, { recursive: true });
-for (const size of SIZES) {
-  const file = join(OUT_DIR, `icon${size}.png`);
+for (const [name, size] of OUTPUTS) {
+  const file = join(OUT_DIR, name);
   writeFileSync(file, encodePng(size, drawIcon(size)));
   console.log(`wrote ${file}`);
 }
-console.log(`Generated ${SIZES.length} icons in images/`);
+
+const [logoName, logoSize] = LOGO;
+const logoFile = join(OUT_DIR, logoName);
+writeFileSync(logoFile, `<?xml version="1.0" encoding="UTF-8"?>\n${markSvg({ id: 'ssLogo', size: logoSize })}\n`);
+console.log(`wrote ${logoFile}`);
+console.log(`Generated ${OUTPUTS.length} icons + ${logoName} in images/`);

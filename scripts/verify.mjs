@@ -230,6 +230,52 @@ if (existsSync(join(ROOT, 'README.md'))) {
   readme.indexOf('dinhdidaudo/shapeshift') !== -1 ? ok('README links the ShapeShift repo') : fail('README links the ShapeShift repo');
 }
 
+section('brand unification');
+// The mark has exactly one definition: scripts/brand-spec.mjs. The PNG icons
+// and images/logo.svg are regenerated from it, and the inline HTML copies must
+// carry the same geometry and the same aurora stops. This gate exists because
+// the popup once shipped #46e3d0/#7c8cff at the old coordinates while the
+// options page shipped the new ones, so the two headers visibly disagreed.
+const brand = await import('./brand-spec.mjs');
+const parts = brand.markParts();
+const geometry = [
+  parts.transform,
+  parts.rect,
+  parts.circle,
+  `stroke-width="${brand.MARK.stroke}"`
+];
+const surfaces = [
+  ['popup/popup.html', 'ssMarkPopup', 'ssRingPopup'],
+  ['options/options.html', 'ssMarkOptions', 'ssRingOptions']
+];
+const brandFails = [];
+surfaces.forEach(([rel, markId, ringId]) => {
+  const html = text(join(ROOT, rel));
+  geometry.forEach((frag) => { if (!html.includes(frag)) brandFails.push(rel + ' geometry ' + frag); });
+  brand.AURORA.forEach((stop) => {
+    const tag = `offset="${stop.offset}" stop-color="${stop.color}"`;
+    if (!html.includes(tag)) brandFails.push(rel + ' stop ' + stop.color);
+  });
+  [markId, ringId].forEach((id) => {
+    if (!html.includes(`id="${id}"`)) brandFails.push(rel + ' gradient ' + id);
+  });
+});
+// The CSS must reference the ring gradients the HTML defines.
+[['popup/popup.css', 'ssRingPopup'], ['options/options.css', 'ssRingOptions']].forEach(([rel, id]) => {
+  if (!text(join(ROOT, rel)).includes(`url(#${id})`)) brandFails.push(rel + ' url(#' + id + ')');
+});
+// Retired concepts, palettes and geometry must not come back.
+const retired = ['#46e3d0', '#7c8cff', 'x="5.2"', 'width="21.6"', 'x="12.6"', 'x="4.4"', 'x="13.4"', 'rx="7"', 'rx="3.6"'];
+['popup/popup.html', 'options/options.html'].forEach((rel) => {
+  const html = text(join(ROOT, rel));
+  retired.forEach((needle) => { if (html.includes(needle)) brandFails.push(rel + ' retired ' + needle); });
+});
+brandFails.length === 0
+  ? ok('popup/options/rings share the canonical mark and aurora')
+  : fail('brand mark is unified', brandFails.slice(0, 8).join(', '));
+existsSync(join(ROOT, 'images', 'logo.svg')) ? ok('logo master present') : fail('logo master present');
+existsSync(join(ROOT, 'BRAND.md')) ? ok('BRAND.md present') : fail('BRAND.md present');
+
 // --lint adds the static checks that a plain `verify` run deliberately keeps
 // out: they are style/hazard rules, not structural contract checks. Before
 // this section existed the flag only changed the final banner.

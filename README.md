@@ -1,5 +1,7 @@
 # ShapeShift
 
+<p><img src="images/logo.svg" alt="ShapeShift logo" width="88" height="88"></p>
+
 ![ShapeShift](screenshot.png)
 
 **ShapeShift** gives every website a different, stable device fingerprint. It is a Manifest V3 Chromium extension that applies deterministic, per-origin noise to the APIs fingerprinters read — Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Navigator, Timezone, Sensors, Touch, Media, Geolocation and Detection surfaces.
