@@ -62,7 +62,7 @@ npm run clean
 ## Project Structure
 
 ```
-browser-fingerprint-shuffler/
+shapeshift/
 ├── src/                    # TypeScript source files
 │   ├── core/              # Core modules (config, crypto, etc.)
 │   ├── content/           # Content scripts and hooks

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Browser Fingerprint Shuffler will be documented in this file.
+All notable changes to ShapeShift will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -243,7 +243,7 @@ This release represents a complete transformation of the extension from a basic 
 ## Notes
 
 - This extension is under active development
-- Report issues at: https://github.com/Emlembow/browser-fingerprint-shuffler/issues
+- Report issues at: https://github.com/dinhdidaudo/shapeshift/issues
 - Contributions welcome!
 - MIT License - Free and Open Source
 

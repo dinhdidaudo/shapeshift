@@ -1,4 +1,4 @@
-// Background service worker for Browser Fingerprint Shuffler
+// Background service worker for ShapeShift
 // Handles statistics tracking, aggregation, and automatic fingerprint rotation
 
 // Initialize on install or startup
