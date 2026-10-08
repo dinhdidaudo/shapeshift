@@ -148,12 +148,8 @@ function setHero (enabled, config) {
 }
 
 function setSiteState (enabled) {
-  const note = $('siteNote');
   const toggle = $('siteToggle');
   if (toggle) toggle.checked = enabled;
-  if (note) {
-    note.textContent = enabled ? 'Protection is on for this origin. Reload applies changes instantly.' : 'Protection is off for this origin. The site sees your real device.';
-  }
 }
 
 async function loadStats () {

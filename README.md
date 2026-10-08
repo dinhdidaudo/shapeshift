@@ -174,6 +174,4 @@ Run the snippet twice — the values must be identical both times and different 
 
 MIT — see [LICENSE](LICENSE).
 
-## Credits
-
-Created and maintained by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)).
+Copyright (c) 2026 **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)).

@@ -1,8 +1,9 @@
 // ShapeShift - regenerate images/icon*.png with zero dependencies.
 // Usage: node scripts/generate-icons.mjs
 //
-// Draws the ShapeShift mark (deep-space tile + aurora slash) at every size
-// declared in manifest.json and writes real PNG files using only node:zlib.
+// Draws the unified ShapeShift mark: a rounded obsidian tile with an aurora
+// gradient and the two-triangle "shift" glyph used by the popup and the
+// control room. Writes real PNG files using only node:zlib.
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -70,45 +71,77 @@ function mix (a, b, t) {
   return a + (b - a) * t;
 }
 
+// Aurora ramp: sky -> indigo -> violet, matching --edge in both stylesheets.
+function aurora (t) {
+  const clamped = Math.max(0, Math.min(1, t));
+  if (clamped < 0.55) {
+    const k = clamped / 0.55;
+    return [mix(0x7D, 0x6D, k), mix(0xD3, 0x8B, k), mix(0xFC, 0xFF, k)];
+  }
+  const k = (clamped - 0.55) / 0.45;
+  return [mix(0x6D, 0xA7, k), mix(0x8B, 0x8B, k), mix(0xFF, 0xFA, k)];
+}
+
+// Barycentric coverage for the triangle (x1,y1)-(x2,y2)-(x3,y3) at (px,py).
+function triCoverage (px, py, x1, y1, x2, y2, x3, y3) {
+  const d1 = (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2);
+  const d2 = (px - x3) * (y2 - y3) - (x2 - x3) * (py - y3);
+  const d3 = (px - x1) * (y3 - y1) - (x3 - x1) * (py - y1);
+  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+  return hasNeg && hasPos ? 0 : 1;
+}
+
 function drawIcon (size) {
   const rgba = Buffer.alloc(size * size * 4);
-  const radius = size * 0.22;
-  const cx = (size - 1) / 2;
-  const cy = (size - 1) / 2;
+  const s = size;
+  const radius = s * 0.23;
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4;
+  // The mark occupies the middle of the tile, matching the SVG's 32x32 box.
+  const unit = s / 32;
+  const up = [19, 3.4, 30.6, 14.6, 7.4, 14.6];          // upper triangle
+  const down = [13, 28.6, 1.4, 17.4, 24.6, 17.4];        // lower triangle
 
-      // Rounded-square mask with 1px antialiasing.
-      const dx = Math.max(radius - x, x - (size - 1 - radius), 0);
-      const dy = Math.max(radius - y, y - (size - 1 - radius), 0);
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      const i = (y * s + x) * 4;
+
+      // Rounded-square mask with antialiasing.
+      const dx = Math.max(radius - x, x - (s - 1 - radius), 0);
+      const dy = Math.max(radius - y, y - (s - 1 - radius), 0);
       const corner = Math.sqrt(dx * dx + dy * dy);
       const alpha = Math.max(0, Math.min(1, radius - corner + 0.5));
       if (alpha <= 0) continue;
 
-      // Deep-space base: dark navy to indigo diagonal.
-      const t = (x + y) / (2 * size);
-      let r = mix(0x0A, 0x1B, t);
-      let g = mix(0x0E, 0x1F, t);
-      let b = mix(0x1E, 0x4A, t);
+      // Obsidian base: near-black navy with a faint indigo lift top-left.
+      const t = (x + y) / (2 * s);
+      let r = mix(0x08, 0x0D, t);
+      let g = mix(0x0C, 0x12, t);
+      let b = mix(0x18, 0x24, t);
 
-      // Aurora slash from bottom-left to top-right.
-      const dist = Math.abs((x - y) - (size * 0.12)) / (size * 0.26);
-      if (dist < 1) {
-        const glow = (1 - dist) ** 2;
-        r = mix(r, 0x4F, glow);
-        g = mix(g, 0xE3, glow);
-        b = mix(b, 0xC8, glow);
-      }
+      // Glyph pixels, sampled in the 32x32 design space.
+      const ux = (x + 0.5) / unit;
+      const uy = (y + 0.5) / unit;
+      const inUp = triCoverage(ux, uy, up[0], up[1], up[2], up[3], up[4], up[5]);
+      const inDown = triCoverage(ux, uy, down[0], down[1], down[2], down[3], down[4], down[5]);
 
-      // Bright core where the slash crosses the centre.
-      const coreDist = Math.hypot(x - cx, y - cy) / (size * 0.18);
-      if (coreDist < 1) {
-        const core = (1 - coreDist) ** 2 * 0.85;
-        r = mix(r, 0xE9, core);
-        g = mix(g, 0xFF, core);
-        b = mix(b, 0xF6, core);
+      if (inUp || inDown) {
+        // Gradient runs along the mark's own diagonal, like the SVG.
+        const ramp = Math.max(0, Math.min(1, (ux + uy) / 32));
+        const [ar, ag, ab] = aurora(ramp * 1.15);
+        const strength = inUp ? 1 : 0.58;  // lower triangle is the faded twin
+        r = mix(r, ar, strength);
+        g = mix(g, ag, strength);
+        b = mix(b, ab, strength);
+      } else {
+        // Subtle aurora bloom behind the glyph so the tile never reads flat.
+        const bloom = Math.max(0, 1 - Math.hypot(ux - 16, uy - 16) / 18) ** 2 * 0.22;
+        if (bloom > 0) {
+          const [ar, ag, ab] = aurora((ux + uy) / 32);
+          r = mix(r, ar, bloom);
+          g = mix(g, ag, bloom);
+          b = mix(b, ab, bloom);
+        }
       }
 
       rgba[i] = Math.round(r);
