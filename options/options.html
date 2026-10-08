@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ShapeShift — Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span></div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none">
+            <defs><linearGradient id="g1" x1="4" y1="2" x2="28" y2="30" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#818cf8"/><stop offset="1" stop-color="#f0abfc"/></linearGradient></defs>
+            <path d="M16 2.5 27.3 9v14L16 29.5 4.7 23V9L16 2.5Z" stroke="url(#g1)" stroke-width="1.6" stroke-linejoin="round"/>
+            <path d="M16 9.4 21.6 12.7v6.6L16 22.6l-5.6-3.3v-6.6L16 9.4Z" fill="url(#g1)" fill-opacity=".85"/>
+          </svg>
+        </span>
+        <div><strong>ShapeShift</strong><span>control room</span></div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item active" data-panel="overview"><span class="nav-dot"></span>Overview</button>
+        <button class="nav-item" data-panel="surfaces">Surfaces</button>
+        <button class="nav-item" data-panel="network">Network &amp; media</button>
+        <button class="nav-item" data-panel="identity">Identity</button>
+        <button class="nav-item" data-panel="sites">Sites</button>
+        <button class="nav-item" data-panel="advanced">Advanced</button>
+        <button class="nav-item" data-panel="about">About</button>
+      </nav>
+
+      <div class="side-foot">
+        <span id="sideStatus">All changes saved</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="panelTitle">Overview</h1>
+          <p id="panelSub">Control how ShapeShift reshapes your fingerprint.</p>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn ghost" id="resetAllBtn" type="button">Reset all</button>
+          <button class="btn primary" id="saveBtn" type="button">Save changes</button>
+        </div>
+      </header>
+
+      <section class="panel active" id="panel-overview">
+        <div class="hero-card">
+          <div class="hero-ring"><svg viewBox="0 0 96 96" width="88" height="88"><circle class="ring-track" cx="48" cy="48" r="40"/><circle class="ring-progress" id="overviewRing" cx="48" cy="48" r="40"/></svg><span id="overviewScore">0</span></div>
+          <div class="hero-text">
+            <div class="pill"><span class="dot"></span><span id="overviewStatus">Protection active</span></div>
+            <h2>Deterministic, per-origin fingerprint shaping</h2>
+            <p>Every protected origin receives its own seeded noise profile across the enabled surfaces below. Nothing leaves your browser.</p>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="stat"><span class="stat-value" id="statSurfaces">0</span><span class="stat-label">Surfaces on</span></div>
+          <div class="stat"><span class="stat-value" id="statSites">0</span><span class="stat-label">Sites shaped</span></div>
+          <div class="stat"><span class="stat-value" id="statSignals">0</span><span class="stat-label">Signals intercepted</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>Quick presets</h3><span class="muted">One click, tuned profiles</span></div>
+          <div class="preset-row">
+            <button class="preset" data-preset="balanced" type="button"><strong>Balanced</strong><span>Everyday privacy, nothing breaks</span></button>
+            <button class="preset" data-preset="strict" type="button"><strong>Strict</strong><span>Maximum divergence, some sites may misbehave</span></button>
+            <button class="preset" data-preset="compat" type="button"><strong>Compatibility</strong><span>Minimal noise for fragile apps</span></button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-surfaces">
+        <div class="card">
+          <div class="card-head"><h3>Rendering surfaces</h3><span class="muted">Canvas, WebGL, audio, fonts</span></div>
+          <div id="groupSurfaces" class="rows"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-network">
+        <div class="card">
+          <div class="card-head"><h3>Network &amp; media</h3><span class="muted">WebRTC, devices, sensors</span></div>
+          <div id="groupNetwork" class="rows"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-identity">
+        <div class="card">
+          <div class="card-head"><h3>Identity model</h3><span class="muted">Seeding and rotation</span></div>
+          <div id="groupIdentity" class="rows"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Manual rotation</h3><span class="muted">Force a brand new identity</span></div>
+          <p class="muted">Generates a fresh salt and reloads every open tab. Sites will see a new device.</p>
+          <button class="btn danger" id="rotateNowBtn" type="button">Generate new identity</button>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-sites">
+        <div class="card">
+          <div class="card-head"><h3>Per-site rules</h3><span class="muted">Paused origins appear here</span></div>
+          <div id="siteList" class="rows"></div>
+          <div class="site-add">
+            <input type="text" id="newSiteInput" placeholder="example.com" autocomplete="off" spellcheck="false">
+            <button class="btn ghost" id="addSiteBtn" type="button">Pause on this site</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-advanced">
+        <div class="card">
+          <div class="card-head"><h3>Cryptography</h3><span class="muted">Seed derivation strength</span></div>
+          <div id="groupCrypto" class="rows"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Diagnostics</h3><span class="muted">Console verbosity</span></div>
+          <div id="groupDebug" class="rows"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-about">
+        <div class="card about">
+          <h3>ShapeShift</h3>
+          <p class="muted">Per-origin browser fingerprint shaping for Chromium (Manifest V3). Built on the deterministic-noise engine inherited from browser-fingerprint-shuffler and reworked end to end.</p>
+          <ul class="about-list">
+            <li><span>Version</span><strong id="aboutVersion">1.0.0</strong></li>
+            <li><span>Engine</span><strong>Noise + KDF, per origin</strong></li>
+            <li><span>Data</span><strong>Local only, never uploaded</strong></li>
+            <li><span>Licence</span><strong>MIT</strong></li>
+          </ul>
+          <p><a href="https://github.com/dinhdidaudo/shapeshift" target="_blank" rel="noreferrer">github.com/dinhdidaudo/shapeshift</a></p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="options.js"></script>
+</body>
+</html>

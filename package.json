@@ -1,0 +1,22 @@
+{
+  "name": "shapeshift",
+  "version": "1.0.0",
+  "description": "ShapeShift - per-origin browser fingerprint shaping for Chrome (MV3).",
+  "author": "dinhdidaudo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:dinhdidaudo/shapeshift.git"
+  },
+  "homepage": "https://github.com/dinhdidaudo/shapeshift",
+  "scripts": {
+    "verify": "node scripts/verify.mjs",
+    "lint": "node scripts/verify.mjs --lint",
+    "icons": "node scripts/generate-icons.mjs",
+    "screenshots": "node scripts/screenshot.mjs",
+    "test": "node scripts/verify.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
