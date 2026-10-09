@@ -9,7 +9,7 @@
 Built from the ground up with a premium control-room interface: deep-space glass, aurora accents, and a live surface map.
 
 - Repository: `git@github.com:dinhdidaudo/shapeshift.git`
-- Author: **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo))
+- Author: **Phạm Văn Định**
 - License: MIT
 - Privacy policy: [PRIVACY.md](PRIVACY.md) · Security policy: [SECURITY.md](SECURITY.md)
 
@@ -176,4 +176,4 @@ Run the snippet twice — the values must be identical both times and different 
 
 MIT — see [LICENSE](LICENSE).
 
-Copyright (c) 2026 **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)).
+Copyright (c) **Phạm Văn Định**.

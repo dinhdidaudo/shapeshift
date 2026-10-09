@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans acting like them) working in this repo
 
 ## 1. What this project is
 
-**ShapeShift** is a Chromium Manifest V3 extension that gives every website a different, stable device fingerprint. Created by **Phạm Văn Định** ([@dinhdidaudo](https://github.com/dinhdidaudo)), it ships with a premium control-room UI.
+**ShapeShift** is a Chromium Manifest V3 extension that gives every website a different, stable device fingerprint. Created by **Phạm Văn Định**, it ships with a premium control-room UI.
 
 Core idea: derive a deterministic PRNG seed from `(persistent salt, page origin)` and use it to perturb fingerprinting surfaces — Canvas, WebGL, Audio, WebRTC, Fonts, Screen, Navigator, Timezone, Sensors, Touch, Media, Geolocation, Detection.
 

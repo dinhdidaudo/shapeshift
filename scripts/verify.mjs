@@ -44,7 +44,7 @@ if (manifest) {
   (manifest.description === undefined || LOCALE_MSG.test(String(manifest.description)))
     ? ok('description is localized or absent')
     : fail('description is localized or absent');
-  manifest.author === 'dinhdidaudo' ? ok('author is dinhdidaudo') : fail('author is dinhdidaudo');
+  manifest.author === 'Phạm Văn Định' ? ok('author is Phạm Văn Định') : fail('author is Phạm Văn Định', String(manifest.author));
   /^[0-9]+[.][0-9]+[.][0-9]+$/.test(String(manifest.version)) ? ok('version is semver') : fail('version is semver');
 
   const allowed = new Set(['storage', 'tabs', 'alarms', 'notifications']);
