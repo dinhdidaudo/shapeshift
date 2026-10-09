@@ -7,8 +7,20 @@
 (function () {
   const schema = globalThis.ssConfigSchema || {};
   const defaults = schema.defaults || {};
+  // P1: this used to be a shallow copy, so every nested group
+  // (`config.navigator`, `config.webrtc`, ...) was the SAME object as
+  // `schema.defaults.navigator`. A hook that mutated its group in place
+  // therefore edited the process-wide defaults, and the next
+  // ssLoadConfig() call merged the mutated values back in as if the user
+  // had chosen them. Deep-clone the groups so defaults stay pristine.
+  const cloneGroup = (v) => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return v;
+    const out = {};
+    for (const gk in v) out[gk] = v[gk];
+    return out;
+  };
   const config = {};
-  for (const k in defaults) config[k] = defaults[k];
+  for (const k in defaults) config[k] = cloneGroup(defaults[k]);
 
   const LEGACY_FLAT_TO_NESTED = schema.flatToNested || {};
 

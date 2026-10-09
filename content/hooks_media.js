@@ -87,12 +87,21 @@
 
           // Very rarely flip the result for less common codecs (5% chance)
           // Only for codecs that are not critical for most sites
+          // P0: `type` is caller-controlled and may be a Symbol or an object with
+          // a throwing toString; calling .includes() on it threw TypeError where
+          // the native method would simply return false. Coerce defensively.
+          const typeStr = typeof type === 'string' ? type : String(type);
           const nonCriticalCodecs = ['av01', 'vp9', 'opus'];
-          const isNonCritical = nonCriticalCodecs.some(codec => type.includes(codec));
+          const isNonCritical = nonCriticalCodecs.some(codec => typeStr.includes(codec));
 
-          if (isNonCritical && stableRoll('mstype', type) < 0.05) {
-            log(`[shapeshift][media] isTypeSupported: Flipped result for ${type}`);
-            return !result;
+          // P1: only ever upgrade "unsupported" to "supported", never the
+          // reverse. Reporting a codec the browser really can decode as
+          // unsupported makes the player fall back to a worse format (or
+          // fail), while the opposite merely keeps the page on a format it
+          // can already handle. Keyed on the type string so repeat calls agree.
+          if (result === false && isNonCritical && stableRoll('mstype', typeStr) < 0.05) {
+            log(`[shapeshift][media] isTypeSupported: reported supported for ${typeStr}`);
+            return true;
           }
 
           return result;
@@ -187,7 +196,7 @@
             // Don't change to avoid breaking audio, but add timing resistance
             return realRate;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
 
@@ -210,13 +219,21 @@
             globalThis.ssTimingUtils.randomDelaySync();
           }
 
+          // P0: `type` is caller-controlled and may be a Symbol or an object with
+          // a throwing toString; calling .includes() on it threw TypeError where
+          // the native method would simply return false. Coerce defensively.
+          const typeStr = typeof type === 'string' ? type : String(type);
           const result = origIsTypeSupported.call(this, type);
 
           // Add very rare flips for uncommon formats (5% chance)
           const uncommonFormats = ['video/av1', 'audio/opus'];
-          if (uncommonFormats.some(fmt => type.includes(fmt)) && stableRoll('rectype', type) < 0.05) {
-            log(`[shapeshift][media] MediaRecorder.isTypeSupported: Flipped for ${type}`);
-            return !result;
+          // P1: same rule as MediaSource - only upgrade absence to presence, so
+          // a format the recorder really supports is never hidden.
+          if (result === false &&
+              uncommonFormats.some(fmt => typeStr.includes(fmt)) &&
+              stableRoll('rectype', typeStr) < 0.05) {
+            log(`[shapeshift][media] MediaRecorder.isTypeSupported: reported supported for ${typeStr}`);
+            return true;
           }
 
           return result;

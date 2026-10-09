@@ -1,9 +1,6 @@
 // Fingerprint sampler utilities for debugging/testing.
 (function () {
   const hash = globalThis.ssHashString || (s => s.length);
-  const pageScriptUrl = chrome.runtime.getURL("content/test_fingerprint_page.js");
-  let ssTestSeq = 0;
-  let pageHelperReady = false;
   const debug = (globalThis.ssConfig && globalThis.ssConfig.debug) || false;
   const dlog = debug ? console.log : () => { };
 
@@ -54,46 +51,32 @@
     };
   }
 
-  // P0 1.3: injecting <script src="chrome-extension://..."> into the page DOM is
-  // observable by any page script (MutationObserver, resource timing entries,
-  // message listeners) and it used to happen on EVERY load. The helper is only
-  // needed for the diagnostic WebGL sample, so it is now gated on the debug
-  // flag and skipped entirely in normal browsing.
-  function ensurePageHelper () {
-    if (!debug) return Promise.resolve();
-    if (pageHelperReady) return Promise.resolve();
-    return new Promise(resolve => {
-      const script = document.createElement("script");
-      script.src = pageScriptUrl;
-      script.onload = () => { pageHelperReady = true; script.remove(); resolve(); };
-      script.onerror = () => { script.remove(); resolve(); };
-      (document.documentElement || document.head || document.body).appendChild(script);
-    });
-  }
-
-  async function sampleWebGLFromPage () {
-    if (!debug) return "webgl-disabled";
-    await ensurePageHelper();
-    return new Promise(resolve => {
-      const reqId = "ss-test-" + (++ssTestSeq);
-      function onMessage (event) {
-        const data = event.data;
-        if (!data || data.ssTestResponse !== reqId) return;
-        window.removeEventListener("message", onMessage);
-        resolve(data.webgl || "webgl-error");
-      }
-      window.addEventListener("message", onMessage);
-      window.postMessage({ ssTestRequest: reqId }, location.origin);
-      setTimeout(() => {
-        window.removeEventListener("message", onMessage);
-        resolve("webgl-timeout");
-      }, 1000);
-    });
+  // P0 1.3: the old path injected <script src="chrome-extension://..."> into
+  // the page DOM so a MAIN-world helper could sample WebGL. That was observable
+  // by any page script (MutationObserver, resource timing entries, message
+  // listeners) and it ran on every load. MAIN world now owns the WebGL hooks,
+  // and manifest.json exposes no web_accessible_resources, so the injection is
+  // gone: a dangling chrome.runtime.getURL() would only produce a failed
+  // request plus a 1s timeout. Sample from the ISOLATED copy instead.
+  function sampleWebGL () {
+    const canvas = document.createElement("canvas");
+    const gl = safe(
+      () => canvas.getContext("webgl") || canvas.getContext("experimental-webgl"),
+      null
+    );
+    if (!gl) return "no-webgl";
+    const dbg = safe(() => gl.getExtension("WEBGL_debug_renderer_info"), null);
+    return {
+      vendor: safe(() => gl.getParameter(gl.VENDOR), null),
+      renderer: safe(() => gl.getParameter(gl.RENDERER), null),
+      unmaskedVendor: dbg ? safe(() => gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL), null) : null,
+      unmaskedRenderer: dbg ? safe(() => gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL), null) : null
+    };
   }
 
   async function testFingerprint () {
     const canvas = safe(sampleCanvas, "canvas-error");
-    const webgl = await sampleWebGLFromPage();
+    const webgl = safe(sampleWebGL, "webgl-error");
     const audio = safe(sampleAudio, "audio-error");
     const nav = safe(sampleNavigator, "nav-error");
 

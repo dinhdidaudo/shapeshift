@@ -5,7 +5,6 @@
 
   installers.push(function installWebRTCHooks (env) {
     if (!env || !env.config?.enableWebRTCProtection) return;
-    const prng = env.prngFor ? env.prngFor('webrtc') : env.prng;
     const { config } = env;
     const blockIPLeak = config.webrtc?.blockIPLeak !== false;
     const randomizeSDP = config.webrtc?.randomizeSDP !== false;
@@ -281,20 +280,36 @@
               return hash.toString(16).padStart(8, '0');
             }
 
+            // P1: a plain object literal loses MediaDeviceInfo, so
+            // `devices[0] instanceof MediaDeviceInfo` was false for every
+            // entry and the `.toJSON()` method disappeared - a one-line
+            // oracle. Build the copy on the real prototype instead and
+            // only overwrite the fields that must change.
             const modifiedDevices = devices.map((device, index) => {
-              const modified = {
-                deviceId: device.deviceId,
-                kind: device.kind,
-                label: device.label,
-                groupId: device.groupId
+              const modified = Object.create(Object.getPrototypeOf(device));
+              // P0: `modified.deviceId = value` silently did NOTHING. The real
+              // field is a getter-only accessor on MediaDeviceInfo.prototype,
+              // so a plain assignment on an object that inherits from it is
+              // swallowed in sloppy mode and the page kept the REAL deviceId.
+              // Install non-enumerable own accessors that shadow the prototype.
+              const shadow = (key, value) => {
+                try {
+                  Object.defineProperty(modified, key, {
+                    get: () => value, enumerable: false, configurable: true
+                  });
+                } catch (e) { /* ignore */ }
               };
+
+              let deviceId = device.deviceId;
+              let groupId = device.groupId;
+              let label = device.label;
 
               // Randomize device IDs deterministically
               if (randomizeIds && device.deviceId) {
                 const seed = env.seed + index;
-                modified.deviceId = 'fp-' + hashDeviceId(device.deviceId, seed);
+                deviceId = 'ss-' + hashDeviceId(device.deviceId, seed);
                 if (device.groupId) {
-                  modified.groupId = 'fp-group-' + hashDeviceId(device.groupId, seed);
+                  groupId = 'ss-group-' + hashDeviceId(device.groupId, seed);
                 }
               }
 
@@ -308,9 +323,14 @@
 
                 const labels = genericLabels[device.kind] || ['Device'];
                 const labelIndex = Math.floor(stableRoll('label', device.deviceId || device.kind) * labels.length);
-                modified.label = labels[labelIndex];
-                log(`[shapeshift][media] Spoofed label: ${device.label} → ${modified.label}`);
+                label = labels[labelIndex];
+                log(`[shapeshift][media] Spoofed label: ${device.label} → ${label}`);
               }
+
+              shadow('deviceId', deviceId);
+              shadow('groupId', groupId);
+              shadow('kind', device.kind);
+              shadow('label', label);
 
               return modified;
             });

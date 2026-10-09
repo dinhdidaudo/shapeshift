@@ -26,7 +26,7 @@ content/                      Content scripts (ISOLATED world)
   stats_tracker.js              Counts intercepted reads
   content_main.js               Installs all registered hooks
   page_world_injector.js        MAIN-world bridge + WebGL patch (page context)
-  test_fingerprint.js / _page.js  Self-test harness
+  test_fingerprint.js          Self-test harness (diagnostic only)
 popup/                        Toolbar popup — status, per-site toggle, rotation
 options/                      Full-page settings UI (the "control room")
 scripts/                      Node utilities (verify, build, icons, migration)

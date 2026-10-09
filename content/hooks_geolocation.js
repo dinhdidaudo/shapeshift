@@ -1,194 +1,28 @@
 // Geolocation API protection.
-// Adds noise to geolocation coordinates to prevent precise location tracking.
+//
+// P0 (world split): every hook in this file used to run in the ISOLATED world,
+// where the page can never observe it - `navigator.geolocation` as read by page
+// script is the MAIN-world object, so all of this was dead weight that still
+// advertised a protection it did not provide. It also drew a fresh streaming
+// `noise()` value on every read, so a page that *could* have seen it would have
+// seen coordinates that changed on every single call.
+//
+// The real, page-visible implementation now lives in the MAIN world
+// (content/page_world_injector.js, "GEOLOCATION HOOKS"): it keys the offset on
+// (seed, coordinate) so repeated reads of the same fix agree, and it shadows the
+// accessors on an object that keeps the native prototype so
+// `coords instanceof GeolocationCoordinates` still holds.
+//
+// This installer is intentionally a no-op: running a second fuzz pass here would
+// either be invisible (if applied to the ISOLATED copy of navigator) or would
+// double-shift the coordinates the page finally receives.
 (function () {
   const installers = (globalThis.ssHookInstallers = globalThis.ssHookInstallers || []);
 
   installers.push(function installGeolocationHooks (env) {
     if (!env || !env.config?.enableGeolocationProtection) return;
-    const prng = env.prngFor ? env.prngFor('geolocation') : env.prng;
-    const { noise, config } = env;
-    const debug = config.debug ? true : false;
-    const log = debug ? console.log : () => {};
-
-    function safeWrap (fn) {
-      try {
-        fn();
-      } catch (e) {
-        if (debug) console.error('[shapeshift][geolocation] Hook failed:', e);
-      }
+    if (env.config.debug) {
+      console.log('[shapeshift][geolocation] ISOLATED installer skipped; MAIN world owns this surface');
     }
-
-    // Configurable noise levels (in degrees)
-    // ~1km = 0.01 degrees, ~100m = 0.001 degrees, ~10m = 0.0001 degrees
-    const noiseLevel = config.geolocation?.noiseLevel || 0.001; // Default ~100m
-
-    function addNoiseToCoordinates(coords) {
-      // Add Gaussian noise to latitude and longitude
-      const latNoise = noise(noiseLevel);
-      const lonNoise = noise(noiseLevel);
-
-      return {
-        latitude: coords.latitude + latNoise,
-        longitude: coords.longitude + lonNoise,
-        altitude: coords.altitude, // Keep altitude as-is
-        accuracy: coords.accuracy ? coords.accuracy + Math.abs(latNoise * 111000) : coords.accuracy, // Adjust accuracy
-        altitudeAccuracy: coords.altitudeAccuracy,
-        heading: coords.heading,
-        speed: coords.speed
-      };
-    }
-
-    // Hook navigator.geolocation.getCurrentPosition
-    safeWrap(() => {
-      if (!navigator.geolocation || !navigator.geolocation.getCurrentPosition) return;
-
-      const origGetCurrentPosition = navigator.geolocation.getCurrentPosition;
-      if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origGetCurrentPosition)) {
-        globalThis.ssStealth.markPatched(origGetCurrentPosition);
-
-        navigator.geolocation.getCurrentPosition = function(successCallback, errorCallback, options) {
-          // Track statistics
-          if (globalThis.ssStatsTracker) {
-            globalThis.ssStatsTracker.increment('geolocationReads');
-          }
-
-          if (globalThis.ssTimingUtils) {
-            globalThis.ssTimingUtils.randomDelaySync();
-          }
-
-          log('[shapeshift][geolocation] getCurrentPosition called');
-
-          // Wrap the success callback to modify coordinates
-          const wrappedSuccess = function(position) {
-            // Create a modified position object
-            const noisedCoords = addNoiseToCoordinates(position.coords);
-
-            const modifiedPosition = {
-              coords: noisedCoords,
-              timestamp: position.timestamp
-            };
-
-            log(`[shapeshift][geolocation] Added noise: lat ${position.coords.latitude.toFixed(6)} → ${noisedCoords.latitude.toFixed(6)}, ` +
-                `lon ${position.coords.longitude.toFixed(6)} → ${noisedCoords.longitude.toFixed(6)}`);
-
-            // Call original success callback with modified position
-            if (successCallback) {
-              successCallback(modifiedPosition);
-            }
-          };
-
-          // Call original with wrapped callback
-          return origGetCurrentPosition.call(this, wrappedSuccess, errorCallback, options);
-        };
-
-        log('[shapeshift][geolocation] getCurrentPosition hooked');
-      }
-    });
-
-    // Hook navigator.geolocation.watchPosition
-    safeWrap(() => {
-      if (!navigator.geolocation || !navigator.geolocation.watchPosition) return;
-
-      const origWatchPosition = navigator.geolocation.watchPosition;
-      if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origWatchPosition)) {
-        globalThis.ssStealth.markPatched(origWatchPosition);
-
-        navigator.geolocation.watchPosition = function(successCallback, errorCallback, options) {
-          if (globalThis.ssTimingUtils) {
-            globalThis.ssTimingUtils.randomDelaySync();
-          }
-
-          log('[shapeshift][geolocation] watchPosition called');
-
-          // Wrap the success callback
-          const wrappedSuccess = function(position) {
-            const noisedCoords = addNoiseToCoordinates(position.coords);
-
-            const modifiedPosition = {
-              coords: noisedCoords,
-              timestamp: position.timestamp
-            };
-
-            log(`[shapeshift][geolocation] watchPosition: Added noise to coordinates`);
-
-            if (successCallback) {
-              successCallback(modifiedPosition);
-            }
-          };
-
-          return origWatchPosition.call(this, wrappedSuccess, errorCallback, options);
-        };
-
-        log('[shapeshift][geolocation] watchPosition hooked');
-      }
-    });
-
-    // Hook GeolocationCoordinates (if accessible)
-    // This is more of a fallback in case direct access is attempted
-    safeWrap(() => {
-      if (!window.GeolocationCoordinates) return;
-
-      const proto = window.GeolocationCoordinates.prototype;
-      const latDescriptor = Object.getOwnPropertyDescriptor(proto, 'latitude');
-      const lonDescriptor = Object.getOwnPropertyDescriptor(proto, 'longitude');
-
-      if (!latDescriptor || !lonDescriptor) return;
-
-      // Store original getters
-      const origLatGetter = latDescriptor.get;
-      const origLonGetter = lonDescriptor.get;
-
-      if (!origLatGetter || !origLonGetter) return;
-
-      // Create a WeakMap to store noise per coordinate object
-      const noiseMap = new WeakMap();
-
-      Object.defineProperty(proto, 'latitude', {
-        get: function() {
-          if (globalThis.ssTimingUtils) {
-            globalThis.ssTimingUtils.randomDelaySync();
-          }
-
-          const originalLat = origLatGetter.call(this);
-
-          // Get or create noise for this object
-          if (!noiseMap.has(this)) {
-            noiseMap.set(this, {
-              latNoise: noise(noiseLevel),
-              lonNoise: noise(noiseLevel)
-            });
-          }
-
-          const noiseData = noiseMap.get(this);
-          return originalLat + noiseData.latNoise;
-        },
-        enumerable: true,
-        configurable: true
-      });
-
-      Object.defineProperty(proto, 'longitude', {
-        get: function() {
-          if (globalThis.ssTimingUtils) {
-            globalThis.ssTimingUtils.randomDelaySync();
-          }
-
-          const originalLon = origLonGetter.call(this);
-
-          if (!noiseMap.has(this)) {
-            noiseMap.set(this, {
-              latNoise: noise(noiseLevel),
-              lonNoise: noise(noiseLevel)
-            });
-          }
-
-          const noiseData = noiseMap.get(this);
-          return originalLon + noiseData.lonNoise;
-        },
-        enumerable: true,
-        configurable: true
-      });
-
-      log('[shapeshift][geolocation] GeolocationCoordinates prototype hooked');
-    });
   });
 })();

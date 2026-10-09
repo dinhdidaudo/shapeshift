@@ -64,8 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `web_accessible_resources` is limited to the self-test helper and no longer
-  exposes the removed `content/webgl_page_patch.js`.
+- `web_accessible_resources` is now empty, and the page-world self-test helper
+  it used to expose has been deleted. That helper was a free extension-detection
+  oracle for any site that guessed the URL; the self-test now samples WebGL from
+  the ISOLATED world instead, so no page-visible helper is needed.
 - `content/test_fingerprint.js` is a diagnostic only: `content/content_main.js`
   installs the hooks even when the self-test failed to load.
 

@@ -113,13 +113,20 @@
 
       HTMLCanvasElement.prototype.toBlob = function () {
         const args = arguments;
-        const canvas = this;
+        // P1: the pending 2d context and the pristine ImageData used to be
+        // stashed on the canvas element itself as `__ssCtx` / `__ssSnapshot`.
+        // That made them enumerable own properties of a DOM node the page can
+        // walk (`Object.keys(canvas)`), and two overlapping toBlob calls on the
+        // same canvas overwrote each other's stash, so the second callback
+        // restored the wrong snapshot. Keep both in this call's closure.
+        let pendingCtx = null;
+        let pendingSnapshot = null;
         function restore () {
-          if (canvas.__ssCtx && canvas.__ssSnapshot) {
-            try { canvas.__ssCtx.putImageData(canvas.__ssSnapshot, 0, 0); } catch (e) { /* ignore */ }
+          if (pendingCtx && pendingSnapshot) {
+            try { pendingCtx.putImageData(pendingSnapshot, 0, 0); } catch (e) { /* ignore */ }
           }
-          canvas.__ssCtx = null;
-          canvas.__ssSnapshot = null;
+          pendingCtx = null;
+          pendingSnapshot = null;
         }
         try {
           if (globalThis.ssStatsTracker) {
@@ -128,8 +135,8 @@
           const ctx = this.getContext("2d");
           if (ctx && origGetImageData) {
             const snapshot = noisedCopyOf(ctx, this.width, this.height);
-            this.__ssCtx = ctx;
-            this.__ssSnapshot = snapshot.original;
+            pendingCtx = ctx;
+            pendingSnapshot = snapshot.original;
             ctx.putImageData(snapshot.noised, 0, 0);
           }
         } catch (e) { /* ignore */ }

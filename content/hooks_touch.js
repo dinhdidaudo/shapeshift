@@ -5,7 +5,6 @@
 
   installers.push(function installTouchHooks (env) {
     if (!env || !env.config?.enableTouchProtection) return;
-    const prng = env.prngFor ? env.prngFor('touch') : env.prng;
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -21,7 +20,14 @@
     // Touch capability variations
     // Most common: 0 (desktop), 1 (some devices), 5 (mobile), 10 (tablets)
     const touchCapabilities = [0, 0, 0, 0, 1, 5, 10]; // Weighted toward 0 (desktop)
-    const spoofedMaxTouchPoints = touchCapabilities[Math.floor(prng() * touchCapabilities.length)];
+    // P0: Math.floor(prng() * 7) could return 7, which is out of bounds and
+    // yielded `undefined`. Use a hash modulo so the index is always in range
+    // and stable for a given seed, matching the MAIN world formula.
+    const touchSeed = (env.seed >>> 0) || 0;
+    const touchHash = globalThis.ssHashString
+      ? globalThis.ssHashString(touchSeed + ':touch')
+      : touchSeed;
+    const spoofedMaxTouchPoints = touchCapabilities[touchHash % touchCapabilities.length];
 
     log(`[shapeshift][touch] Spoofed maxTouchPoints: ${spoofedMaxTouchPoints}`);
 
@@ -40,7 +46,7 @@
             }
             return spoofedMaxTouchPoints;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][touch] maxTouchPoints hooked');
@@ -95,8 +101,9 @@
         window.matchMedia = function(query) {
           const result = origMatchMedia.call(this, query);
 
-          // Modify pointer-related media queries
-          const lowerQuery = query.toLowerCase();
+          // P0: `query` is caller-controlled; the native matchMedia coerces it
+          // to a string, so a null/Symbol argument must not throw here.
+          const lowerQuery = String(query).toLowerCase();
 
           if (lowerQuery.includes('pointer') || lowerQuery.includes('hover')) {
             if (globalThis.ssTimingUtils) {
@@ -182,7 +189,10 @@
           globalThis.ssStealth.markPatched(origRemoveEventListener);
 
           EventTarget.prototype.addEventListener = function(type, listener, options) {
-            if ((type.startsWith('pointer') || type.startsWith('touch')) && typeof listener === 'function') {
+            // P0: `type` is caller-controlled; .startsWith on a non-string threw
+            // where the native addEventListener would have coerced it.
+            const typeStr = typeof type === 'string' ? type : String(type);
+            if ((typeStr.startsWith('pointer') || typeStr.startsWith('touch')) && typeof listener === 'function') {
               let perTarget = listenerMap.get(listener);
               if (!perTarget) {
                 perTarget = new WeakMap();
@@ -204,7 +214,8 @@
           };
 
           EventTarget.prototype.removeEventListener = function(type, listener, options) {
-            if ((type.startsWith('pointer') || type.startsWith('touch')) && typeof listener === 'function') {
+            const typeStr = typeof type === 'string' ? type : String(type);
+            if ((typeStr.startsWith('pointer') || typeStr.startsWith('touch')) && typeof listener === 'function') {
               const perTarget = listenerMap.get(listener);
               const wrappedListener = perTarget && perTarget.get(this);
               if (wrappedListener) {

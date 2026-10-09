@@ -5,7 +5,6 @@
 
   installers.push(function installFontHooks (env) {
     if (!env || !env.config?.enableFontProtection) return;
-    const prng = env.prngFor ? env.prngFor('fonts') : env.prng;
     const { noise, config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -47,21 +46,35 @@
           // and define the fields as own properties instead.
           const noiseFactor = 0.01; // 1% variation
 
+          // P0: this used a streaming PRNG, so two measureText() calls for the
+          // same string returned different widths - a one-line detector, and it
+          // disagreed with the MAIN world (which keys on seed). Key on
+          // (seed, field, text) so repeat reads agree across both worlds.
+          const hashString = globalThis.ssHashString;
+          const fontSeed = (env.seed >>> 0) || 0;
+          const fieldNoise = (field, input, scale) => {
+            if (!hashString) return noise(scale);
+            const h = hashString(fontSeed + ':font:' + field + ':' + String(input));
+            return ((h / 4294967296) - 0.5) * scale;
+          };
+
           // P1 2.8: TextMetrics exposes different fields per engine, so some
           // of these may be undefined; `undefined + noise(...)` produced NaN
           // and a NaN width breaks layout. Only perturb real, finite numbers.
-          const nn = (value, scale) => (
-            typeof value === 'number' && isFinite(value) ? value + noise(scale) : value
+          const nn = (value, scale, field) => (
+            typeof value === 'number' && isFinite(value)
+              ? value + fieldNoise(field, text, scale)
+              : value
           );
 
           const noisedValues = {
-            width: nn(metrics.width, metrics.width * noiseFactor),
-            actualBoundingBoxLeft: nn(metrics.actualBoundingBoxLeft, noiseFactor),
-            actualBoundingBoxRight: nn(metrics.actualBoundingBoxRight, noiseFactor),
-            actualBoundingBoxAscent: nn(metrics.actualBoundingBoxAscent, noiseFactor),
-            actualBoundingBoxDescent: nn(metrics.actualBoundingBoxDescent, noiseFactor),
-            fontBoundingBoxAscent: nn(metrics.fontBoundingBoxAscent, noiseFactor),
-            fontBoundingBoxDescent: nn(metrics.fontBoundingBoxDescent, noiseFactor),
+            width: nn(metrics.width, metrics.width * noiseFactor, 'w'),
+            actualBoundingBoxLeft: nn(metrics.actualBoundingBoxLeft, noiseFactor, 'abl'),
+            actualBoundingBoxRight: nn(metrics.actualBoundingBoxRight, noiseFactor, 'abr'),
+            actualBoundingBoxAscent: nn(metrics.actualBoundingBoxAscent, noiseFactor, 'aba'),
+            actualBoundingBoxDescent: nn(metrics.actualBoundingBoxDescent, noiseFactor, 'abd'),
+            fontBoundingBoxAscent: nn(metrics.fontBoundingBoxAscent, noiseFactor, 'fba'),
+            fontBoundingBoxDescent: nn(metrics.fontBoundingBoxDescent, noiseFactor, 'fbd'),
             alphabeticBaseline: metrics.alphabeticBaseline,
             hangingBaseline: metrics.hangingBaseline,
             ideographicBaseline: metrics.ideographicBaseline,
@@ -79,7 +92,7 @@
             try {
               Object.defineProperty(noisedMetrics, key, {
                 value: noisedValues[key],
-                enumerable: true,
+                enumerable: false,
                 configurable: true,
                 writable: false
               });
@@ -88,7 +101,8 @@
             }
           }
 
-          log('[shapeshift][fonts] measureText noised:', text.substring(0, 20));
+          // P0: text may be null/undefined; substring() on it threw TypeError.
+          log('[shapeshift][fonts] measureText noised:', String(text).slice(0, 20));
           return noisedMetrics;
         };
 
@@ -121,8 +135,11 @@
           // that really exists makes the page fall back and renders visibly
           // wrong; claiming a missing font exists merely keeps layout on the
           // fallback. Keyed on (font, text) so repeat calls agree.
+          // P0: must include the seed, or this world and the MAIN world give
+          // different answers for the same font, which is itself a signal.
           if (result === false && globalThis.ssHashString) {
-            const flip = (globalThis.ssHashString(String(font) + String(text || '')) % 10) === 0;
+            const fontSeed = (env.seed >>> 0) || 0;
+            const flip = (globalThis.ssHashString(fontSeed + ':fontcheck:' + String(font) + String(text || '')) % 10) === 0;
             if (flip) {
               log('[shapeshift][fonts] check() reported present for:', font);
               return true;
@@ -142,10 +159,15 @@
 
       const fontArray = Array.from(document.fonts);
 
-      // Shuffle font order deterministically
+      // P1: this used the streaming PRNG, so the font list order changed on
+      // every document that installed the hook. A stable order per origin is
+      // what a real FontFaceSet looks like; key the permutation on the seed.
+      const fontSeed = (env.seed >>> 0) || 0;
       const shuffledFonts = fontArray.slice();
       for (let i = shuffledFonts.length - 1; i > 0; i--) {
-        const j = Math.floor(prng() * (i + 1));
+        const j = globalThis.ssHashString
+          ? globalThis.ssHashString(fontSeed + ':fontorder:' + i) % (i + 1)
+          : i;
         [shuffledFonts[i], shuffledFonts[j]] = [shuffledFonts[j], shuffledFonts[i]];
       }
 

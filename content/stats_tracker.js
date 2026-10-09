@@ -47,6 +47,14 @@
 
   // Flush statistics to background script
   function flushStats() {
+    // P2: a pending timer used to survive the flush, so a page that flushed
+    // on pagehide/unload still left a 15 s timeout scheduled against a dead
+    // context. Cancel it here - this is the single place a flush happens.
+    if (flushTimeout) {
+      clearTimeout(flushTimeout);
+      flushTimeout = null;
+    }
+
     // Check if there are any updates to send
     const hasUpdates = Object.values(localStats).some(count => count > 0);
     if (!hasUpdates) return;
@@ -78,8 +86,14 @@
     }
   }
 
-  // Flush on page unload
+  // Flush on page unload. P2: `beforeunload` is unreliable on mobile and is
+  // skipped entirely in the back/forward cache path, so the last batch of
+  // counters was routinely dropped. `pagehide` fires in every teardown path
+  // (including bfcache) and is the event spec recommends for exactly this.
   window.addEventListener('beforeunload', () => {
+    flushStats();
+  });
+  window.addEventListener('pagehide', () => {
     flushStats();
   });
 

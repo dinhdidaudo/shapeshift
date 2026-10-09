@@ -3,45 +3,12 @@
 (function () {
   'use strict';
 
-  // Minimal PRNG (Xoshiro128**) - same as core/prng.js
-  function createPRNG(seed) {
-    function splitmix32(a) {
-      return function() {
-        a |= 0;
-        a = a + 0x9e3779b9 | 0;
-        let t = a ^ a >>> 16;
-        t = Math.imul(t, 0x21f0aaad);
-        t = t ^ t >>> 15;
-        t = Math.imul(t, 0x735a2d97);
-        return ((t = t ^ t >>> 15) >>> 0) / 4294967296;
-      };
-    }
-
-    const smix = splitmix32(seed >>> 0);
-    const state = new Uint32Array(4);
-    state[0] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[1] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[2] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[3] = (smix() * 0xFFFFFFFF) >>> 0;
-
-    function rotl(x, k) {
-      return ((x << k) | (x >>> (32 - k))) >>> 0;
-    }
-
-    return function next() {
-      const result = rotl(Math.imul(state[1], 5), 7) * 9;
-      const t = (state[1] << 9) >>> 0;
-
-      state[2] ^= state[0];
-      state[3] ^= state[1];
-      state[1] ^= state[2];
-      state[0] ^= state[3];
-      state[2] ^= t;
-      state[3] = rotl(state[3], 11);
-
-      return (result >>> 0) / 4294967296;
-    };
-  }
+  // P1 (determinism): every value the MAIN world hands the page is now derived
+  // from hashString(seed + ':surface:field'), not from a streaming PRNG. A
+  // stream advanced once per read, so two reads of the same property disagreed
+  // and the "noise" drifted without bound - a one-line oracle. The inlined
+  // Xoshiro128** copy that used to live here was the last consumer; with it
+  // gone the injector has no per-load mutable RNG state at all.
 
   // FNV-1a hash, identical to core/hash.js. MAIN world does not load the core
   // files, so the same derivation is inlined here to keep per-surface noise
@@ -212,29 +179,12 @@
 
     log('[shapeshift][page] Initializing page-world hooks with config:', config);
 
-    const prng = createPRNG(seed);
-
-    // Gaussian noise
-    let spareGaussian = null;
-    function gaussianNoise(mean = 0, stddev = 1) {
-      if (spareGaussian !== null) {
-        const value = spareGaussian;
-        spareGaussian = null;
-        return mean + stddev * value;
-      }
-
-      const u1 = prng();
-      const u2 = prng();
-      const radius = Math.sqrt(-2 * Math.log(u1));
-      const theta = 2 * Math.PI * u2;
-
-      spareGaussian = radius * Math.sin(theta);
-      return mean + stddev * (radius * Math.cos(theta));
-    }
-
-    const noise = config.useGaussianNoise
-      ? (scale = 1) => gaussianNoise(0, scale)
-      : (scale = 1) => (prng() - 0.5) * scale;
+    // P1 (determinism): the streaming `prng`/`gaussianNoise`/`noise` trio used
+    // to live here. Every call site has since moved to hashString(seed + …),
+    // which is stable across reads and identical in both worlds, so the trio
+    // was dead weight that only invited a future call site to reintroduce a
+    // drifting value. `config.useGaussianNoise` is still accepted and clamped
+    // by sanitizeConfig; it now only documents the intended distribution.
 
     // ========================================================================
     // CANVAS HOOKS
@@ -311,22 +261,29 @@
           }
         };
 
+        // P0: the previous version parked the 2d context and the snapshot on
+        // the canvas element itself (`canvas.__ssCtx`, `canvas.__ssSnapshot`).
+        // Those are page-visible own properties: a detector only has to call
+        // Object.getOwnPropertyNames(canvas) after toBlob() to see the shim and
+        // infer exactly what it does. Keep the pending restore in a closure-scoped
+        // WeakMap instead, so nothing is ever written onto page objects.
+        const pendingRestore = new WeakMap();
+
         HTMLCanvasElement.prototype.toBlob = function() {
           const args = arguments;
           const canvas = this;
           const restore = function () {
-            if (canvas.__ssCtx && canvas.__ssSnapshot) {
-              try { canvas.__ssCtx.putImageData(canvas.__ssSnapshot, 0, 0); } catch (e) { /* ignore */ }
+            const pending = pendingRestore.get(canvas);
+            if (pending) {
+              pendingRestore.delete(canvas);
+              try { pending.ctx.putImageData(pending.original, 0, 0); } catch (e) { /* ignore */ }
             }
-            canvas.__ssCtx = null;
-            canvas.__ssSnapshot = null;
           };
           try {
             const ctx = this.getContext('2d');
             if (ctx && origGetImageData) {
               const snapshot = noisedCopyOf(ctx, this.width, this.height);
-              this.__ssCtx = ctx;
-              this.__ssSnapshot = snapshot.original;
+              pendingRestore.set(canvas, { ctx: ctx, original: snapshot.original });
               ctx.putImageData(snapshot.noised, 0, 0);
             }
           } catch (e) { /* ignore */ }
@@ -344,6 +301,26 @@
             throw e;
           }
         };
+
+        // P2: OffscreenCanvas is a modern canvas-fingerprint path that the
+        // HTMLCanvasElement hooks above never see. getImageData is the read
+        // surface; the export methods consume the backing store, so only the
+        // returned pixels are noised here (no restore dance needed).
+        const offscreenProto = window.OffscreenCanvasRenderingContext2D &&
+          window.OffscreenCanvasRenderingContext2D.prototype;
+        if (offscreenProto && offscreenProto.getImageData) {
+          const origOffscreenGetImageData = offscreenProto.getImageData;
+          offscreenProto.getImageData = function (x, y, w, h) {
+            const imgData = origOffscreenGetImageData.call(this, x, y, w, h);
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+              data[i] += pixelNoise(i);
+              data[i + 1] += pixelNoise(i + 1);
+              data[i + 2] += pixelNoise(i + 2);
+            }
+            return imgData;
+          };
+        }
 
         log('[shapeshift][page][canvas] Hooks installed');
       } catch (e) {
@@ -369,7 +346,11 @@
         ];
 
         function sampleResolution() {
-          const r = prng();
+          // P1: keyed on (seed, field) instead of the streaming PRNG, so two
+          // loads of the same origin advertise the same screen. A rotating
+          // resolution is itself a fingerprint and disagreed with the ISOLATED
+          // world's screen hook.
+          const r = hashString(seed + ':screen:resolution') / 4294967296;
           let cumulative = 0;
           for (const res of commonResolutions) {
             cumulative += res.weight;
@@ -394,7 +375,8 @@
         const spoofedPixelRatio = Math.min(4, Math.max(1, Math.round(realPixelRatio * widthScale * 100) / 100));
 
         const colorDepths = [24, 24, 24, 30, 32];
-        const spoofedColorDepth = colorDepths[Math.floor(prng() * colorDepths.length)];
+        const spoofedColorDepth = colorDepths[
+          hashString(seed + ':screen:colorDepth') % colorDepths.length];
 
         // P1 2.10: availHeight is not height - 40 everywhere (macOS has no
         // taskbar; Windows taskbars are not 40 px). Measure the real gap between
@@ -411,9 +393,12 @@
 
         function defineGetter(obj, prop, getter) {
           try {
+            // P1: patched accessors must be non-enumerable, exactly like the
+            // native Screen/Window getters they replace. An enumerable shadow
+            // shows up in Object.keys(screen) and is a one-line oracle.
             Object.defineProperty(obj, prop, {
               get: getter,
-              enumerable: true,
+              enumerable: false,
               configurable: true
             });
           } catch (e) {
@@ -428,6 +413,14 @@
         defineGetter(window.screen, 'colorDepth', () => spoofedColorDepth);
         defineGetter(window.screen, 'pixelDepth', () => spoofedColorDepth);
         defineGetter(window, 'devicePixelRatio', () => spoofedPixelRatio);
+        // P2: availLeft/availTop are separate high-entropy values that the
+        // previous build left fully real (and disagreeing with a spoofed
+        // availWidth). Derive them from the same seed so they stay consistent.
+        // Real desktop screens report 0; a non-zero availLeft/availTop is a
+        // multi-monitor tell, so pin both to 0 rather than inventing an offset
+        // that would disagree with availWidth.
+        defineGetter(window.screen, 'availLeft', () => 0);
+        defineGetter(window.screen, 'availTop', () => 0);
 
         log('[shapeshift][page][screen] Hooks installed');
       } catch (e) {
@@ -444,8 +437,13 @@
         const realHardwareConcurrency = nav.hardwareConcurrency || 4;
         const realDeviceMemory = nav.deviceMemory || 8;
 
-        const fuzzedConcurrency = Math.max(2, realHardwareConcurrency + Math.floor((prng() - 0.5) * 4));
-        const fuzzedMemory = Math.max(4, realDeviceMemory + Math.floor((prng() - 0.5) * 4));
+        // P1: keyed on (seed, field) rather than the streaming PRNG, so the
+        // advertised core count and memory stay put across reloads and match
+        // the ISOLATED navigator hook instead of drifting on every load.
+        const fuzzedConcurrency = Math.max(2, realHardwareConcurrency +
+          (hashString(seed + ':nav:cores') % 5) - 2);
+        const fuzzedMemory = Math.max(4, realDeviceMemory +
+          (hashString(seed + ':nav:memory') % 5) - 2);
 
         // configurable: true so a later stage (or a user re-init) can redefine
         // the property; a non-configurable descriptor here permanently blocked
@@ -453,7 +451,7 @@
         if (config.navigator?.fuzzHardwareConcurrency !== false) {
           Object.defineProperty(navigator, 'hardwareConcurrency', {
             get: () => fuzzedConcurrency,
-            enumerable: true,
+            enumerable: false,
             configurable: true
           });
         }
@@ -461,7 +459,7 @@
         if (config.navigator?.fuzzDeviceMemory !== false && 'deviceMemory' in navigator) {
           Object.defineProperty(navigator, 'deviceMemory', {
             get: () => fuzzedMemory,
-            enumerable: true,
+            enumerable: false,
             configurable: true
           });
         }
@@ -565,8 +563,10 @@
         });
 
         if (availableZones.length > 0) {
-          // Pick a random timezone from the DST-consistent group
-          const spoofedZone = availableZones[Math.floor(prng() * availableZones.length)];
+          // Pick a timezone from the DST-consistent group, keyed on
+          // (seed, offset) so the same origin always advertises the same zone.
+          const spoofedZone = availableZones[
+            hashString(seed + ':tz:' + offsetKey) % availableZones.length];
 
           // Hook Intl.DateTimeFormat to return spoofed timezone
           Intl.DateTimeFormat = function(...args) {
@@ -601,6 +601,16 @@
     if (config.enableWebGLMasking) {
       try {
         const jitter = config.webglJitter ?? 2;
+        // P0: parameters whose exact value IS the fingerprint (hardware limits,
+        // precision bits) must not be shifted by a constant, or MAX_TEXTURE_SIZE
+        // reports 16386 instead of 16384 and contradicts the same value read
+        // from the ISOLATED world.
+        const INTEGER_LIMIT_PARAMS = new Set([
+          0x0D33 /* MAX_TEXTURE_SIZE */, 0x851C /* MAX_3D_TEXTURE_SIZE */,
+          0x8073 /* MAX_ARRAY_TEXTURE_LAYERS */, 0x8869 /* MAX_VERTEX_ATTRIBS */,
+          0x8B4D /* MAX_COMBINED_UNIFORM_BLOCKS */, 0x8DFB /* MAX_ELEMENT_INDEX */,
+          0x8B4C /* MAX_UNIFORM_BLOCK_SIZE */, 0x0D3A /* MAX_VIEWPORT_DIMS */
+        ]);
         const maskVendors = config.maskWebGLVendorStrings !== false;
         const shuffleExt = config.shuffleWebGLExtensions !== false;
 
@@ -612,16 +622,27 @@
             const value = origGetParameter.call(this, p);
 
             if (typeof value === 'number') {
-              return value + jitter;
+              if (INTEGER_LIMIT_PARAMS.has(p)) return value;
+              // Perturb only within a small relative band so derived quantities
+              // (aspect ratios, unit scales) stay internally consistent.
+              return value + ((hashString(seed + ':wgl:' + p) % 1000) / 1000 - 0.5) * jitter;
             }
 
             const gl = this;
+            // P1: read the UNMASKED_* params by their literal enum values.
+            // `gl.UNMASKED_VENDOR_WEBGL` is only defined once the
+            // WEBGL_debug_renderer_info extension has been enabled on that
+            // context, so the previous `filter(Boolean)` silently dropped both
+            // and left the real GPU string exposed through 0x9245 / 0x9246 -
+            // which is exactly what fingerprinters read.
+            const UNMASKED_VENDOR = 0x9245;
+            const UNMASKED_RENDERER = 0x9246;
             const vendorParams = [
               gl.VENDOR,
               gl.RENDERER,
-              gl.UNMASKED_VENDOR_WEBGL,
-              gl.UNMASKED_RENDERER_WEBGL
-            ].filter(Boolean);
+              UNMASKED_VENDOR,
+              UNMASKED_RENDERER
+            ].filter((v) => typeof v === 'number' && v > 0);
 
             // P1 2.1: key the suffix on (seed, param, value) so repeated
             // getParameter(VENDOR) reads return the same string. A streaming
@@ -654,6 +675,37 @@
         if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
         if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
 
+        // P2: getShaderPrecisionFormat leaks the GPU's float precision triple
+        // (rangeMin / rangeMax / precision) - a stable, cross-browser-visible
+        // hardware tell that the extension previously left fully real. Return
+        // the same shape on the native prototype, but deterministically shift
+        // `precision` by at most one, keyed on (seed, shaderType, precisionType)
+        // so repeated calls on the same context agree.
+        for (const Ctor of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+          if (!Ctor || !Ctor.prototype || !Ctor.prototype.getShaderPrecisionFormat) continue;
+          const origPrecisionFormat = Ctor.prototype.getShaderPrecisionFormat;
+          Ctor.prototype.getShaderPrecisionFormat = function (shaderType, precisionType) {
+            const real = origPrecisionFormat.call(this, shaderType, precisionType);
+            if (!real || typeof real.precision !== 'number') return real;
+            const shifted = real.precision > 0 &&
+              (hashString(seed + ':wglprec:' + shaderType + ':' + precisionType) % 2) === 1
+              ? real.precision - 1
+              : real.precision;
+            const out = Object.create(Object.getPrototypeOf(real));
+            const shadow = (key, value) => {
+              try {
+                Object.defineProperty(out, key, {
+                  get: () => value, enumerable: false, configurable: true
+                });
+              } catch (e) { /* ignore */ }
+            };
+            shadow('rangeMin', real.rangeMin);
+            shadow('rangeMax', real.rangeMax);
+            shadow('precision', shifted);
+            return out;
+          };
+        }
+
         log('[shapeshift][page][webgl] Hooks installed');
       } catch (e) {
         log('[shapeshift][page][webgl] Failed:', e);
@@ -676,13 +728,46 @@
             // Copy first: the native call returns the buffer's live Float32Array,
             // so writing into it corrupted the real audio samples and made the
             // noise accumulate on every read.
+            // P0: key the noise on (channel, index) too, so the two channels of
+            // one buffer do not share a stream and both worlds agree.
+            const ch = channel || 0;
             const copy = new Float32Array(data.length);
             for (let i = 0; i < data.length; i++) {
-              const h = hashString(audioSeed + ':a:' + i);
+              const h = hashString(audioSeed + ':a:' + ch + ':' + i);
               copy[i] = data[i] + ((h / 4294967296) - 0.5) * audioNoiseStrength;
             }
             return copy;
           };
+
+          // P2: getChannelData is not how real audio fingerprints are taken.
+          // AnalyserNode frequency data is, and it was unprotected. The API
+          // writes INTO the caller's array, so mutating in place here is the
+          // contract, not a leaked side effect.
+          const analyserProto = window.AnalyserNode && window.AnalyserNode.prototype;
+          if (analyserProto && analyserProto.getFloatFrequencyData) {
+            const origFloatFreq = analyserProto.getFloatFrequencyData;
+            const origByteFreq = analyserProto.getByteFrequencyData;
+            const floatNoise = (i) =>
+              ((hashString(audioSeed + ':af:' + i) / 4294967296) - 0.5) * audioNoiseStrength;
+            analyserProto.getFloatFrequencyData = function (array) {
+              origFloatFreq.call(this, array);
+              if (array && typeof array.length === 'number') {
+                for (let i = 0; i < array.length; i++) array[i] += floatNoise(i);
+              }
+            };
+            if (typeof origByteFreq === 'function') {
+              analyserProto.getByteFrequencyData = function (array) {
+                origByteFreq.call(this, array);
+                if (array && typeof array.length === 'number') {
+                  for (let i = 0; i < array.length; i++) {
+                    const step = (hashString(audioSeed + ':ab:' + i) % 3) - 1;
+                    const next = array[i] + step;
+                    array[i] = next < 0 ? 0 : (next > 255 ? 255 : next);
+                  }
+                }
+              };
+            }
+          }
 
           log('[shapeshift][page][audio] Hooks installed');
         }
@@ -737,7 +822,7 @@
             for (const key in noised) {
               try {
                 Object.defineProperty(out, key, {
-                  value: noised[key], enumerable: true, configurable: true, writable: false
+                  value: noised[key], enumerable: false, configurable: true, writable: false
                 });
               } catch (e) {
                 out[key] = noised[key];
@@ -782,7 +867,11 @@
             let out = sdp;
             if (blockIPLeak) {
               const kept = [];
-              const lines = out.split('\n');
+              // P0: WebRTC SDP lines are CRLF-terminated, so split('\n') left a
+              // trailing '\r' on every line and / typ host( |$)/ never matched -
+              // host/srflx candidates leaked even though the hook claimed to
+              // remove them. Split on CRLF and normalise the line first.
+              const lines = out.split(/\r?\n/);
               for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 if (/^a=candidate:/.test(line) &&
@@ -791,23 +880,12 @@
               }
               out = kept.join('\n');
             }
-            if (randomizeSDP) {
-              out = out.replace(/^a=fingerprint:(\w+)\s+([0-9A-F:]+)$/gm, function (m, alg, fp) {
-                const parts = fp.split(':');
-                const mod = parts.map(function (part, idx) {
-                  const num = parseInt(part, 16);
-                  const off = hashString(webrtcSeed + ':fp:' + idx + ':' + part) % 256;
-                  return ((num + off) % 256).toString(16).toUpperCase().padStart(2, '0');
-                });
-                return 'a=fingerprint:' + alg + ' ' + mod.join(':');
-              });
-              out = out.replace(/^a=ice-ufrag:(.+)$/gm, function (m, u) {
-                return 'a=ice-ufrag:' + u + (hashString(webrtcSeed + ':ufrag:' + u) % 0xFFFF).toString(16);
-              });
-              out = out.replace(/^a=ice-pwd:(.+)$/gm, function (m, p) {
-                return 'a=ice-pwd:' + p + (hashString(webrtcSeed + ':pwd:' + p) % 0xFFFF).toString(16);
-              });
-            }
+            // P0: the DTLS fingerprint and the ICE ufrag/pwd are part of the
+            // cryptographic handshake. Rewriting them locally broke every real
+            // peer connection while providing no privacy benefit (they are
+            // per-session anyway, not per-device). The fingerprint also has to
+            // stay consistent with the certificate the SDP is describing, so
+            // leave the whole `m=`/`a=fingerprint`/`a=ice-*` block untouched.
             return out;
           }
 
@@ -847,6 +925,87 @@
         log('[shapeshift][page][webrtc] Hooks installed');
       } catch (e) {
         log('[shapeshift][page][webrtc] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // MEDIA DEVICE HOOKS (MAIN world) - P0: enumerateDevices used to live only
+    // in the ISOLATED world, so the page kept seeing the real deviceId /
+    // groupId / label triple that is a stable cross-site identifier.
+    // ========================================================================
+    if (config.enableMediaDeviceProtection && navigator.mediaDevices &&
+        navigator.mediaDevices.enumerateDevices) {
+      try {
+        const randomizeIds = !config.mediaDevices || config.mediaDevices.randomizeDeviceIds !== false;
+        const spoofLabels = !config.mediaDevices || config.mediaDevices.spoofDeviceLabels !== false;
+        const origEnumerateDevices = navigator.mediaDevices.enumerateDevices;
+
+        // Deterministic 32-bit FNV-1a. The device list is copied into new
+        // plain records so the native MediaDeviceInfo objects the UA hands
+        // back are never mutated in place.
+        const hashDeviceId = (value) => {
+          let h = 0x811c9dc5;
+          const s = String(value);
+          for (let i = 0; i < s.length; i++) {
+            h ^= s.charCodeAt(i);
+            h = Math.imul(h, 0x01000193) >>> 0;
+          }
+          return h.toString(16).padStart(8, '0');
+        };
+
+        const genericLabels = {
+          audioinput: ['Microphone', 'Default Microphone', 'Internal Microphone'],
+          audiooutput: ['Speaker', 'Default Speaker', 'Internal Speaker'],
+          videoinput: ['Camera', 'Default Camera', 'Built-in Camera']
+        };
+
+        navigator.mediaDevices.enumerateDevices = function () {
+          return origEnumerateDevices.call(this).then(function (devices) {
+            return devices.map(function (device) {
+              const kind = device.kind;
+              let deviceId = device.deviceId;
+              let groupId = device.groupId;
+              let label = device.label;
+
+              if (randomizeIds && deviceId) {
+                deviceId = 'ss-' + hashDeviceId(seed + ':dev:' + kind + ':' + deviceId);
+                if (groupId) {
+                  groupId = 'ss-group-' + hashDeviceId(seed + ':grp:' + groupId);
+                }
+              }
+              if (spoofLabels && label) {
+                const labels = genericLabels[kind] || ['Device'];
+                label = labels[hashString(seed + ':label:' + (device.deviceId || kind)) % labels.length];
+              }
+
+              // P1: a plain object literal loses MediaDeviceInfo, so
+              // `devices[0] instanceof MediaDeviceInfo` was false for every
+              // entry and `.toJSON()` disappeared - a one-line oracle. Build
+              // the copy on the real prototype instead, and install the fields
+              // as NON-ENUMERABLE own accessors: native MediaDeviceInfo exposes
+              // them as prototype getters with no own enumerable properties,
+              // and a plain assignment would hit the setter-less prototype
+              // accessor and silently keep the real value.
+              const out = Object.create(Object.getPrototypeOf(device));
+              const shadow = (key, value) => {
+                try {
+                  Object.defineProperty(out, key, {
+                    get: () => value, enumerable: false, configurable: true
+                  });
+                } catch (e) { /* ignore */ }
+              };
+              shadow('deviceId', deviceId);
+              shadow('groupId', groupId);
+              shadow('kind', kind);
+              shadow('label', label);
+              return out;
+            });
+          });
+        };
+
+        log('[shapeshift][page][mediaDevices] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][mediaDevices] Failed:', e);
       }
     }
 
@@ -894,7 +1053,7 @@
             get usedJSHeapSize () { return Math.floor(baseUsed + jitter('mu', baseUsed * 0.1)); }
           };
           Object.defineProperty(performance, 'memory', {
-            get: () => noisedMemory, enumerable: true, configurable: true
+            get: () => noisedMemory, enumerable: false, configurable: true
           });
         }
 
@@ -905,10 +1064,10 @@
             hashString(seed + ':conn') % connectionTypes.length];
           const spoofedDownlink = spoofedType === 'wifi' ? 10 : 5;
           Object.defineProperty(connection, 'effectiveType', {
-            get: () => spoofedType, enumerable: true, configurable: true
+            get: () => spoofedType, enumerable: false, configurable: true
           });
           Object.defineProperty(connection, 'downlink', {
-            get: () => spoofedDownlink, enumerable: true, configurable: true
+            get: () => spoofedDownlink, enumerable: false, configurable: true
           });
         }
 
@@ -920,6 +1079,9 @@
         // empty native-like view so item()/namedItem()/iteration still exist.
         const realPlugins = navigator.plugins;
         const realMimeTypes = navigator.mimeTypes;
+        // P0: without ownKeys/getOwnPropertyDescriptor the proxy still exposed
+        // the real plugin indices to Object.getOwnPropertyNames / Object.keys,
+        // which is exactly the enumeration this block is supposed to defeat.
         const emptyView = (real) => new Proxy(real, {
           get (t, prop) {
             if (prop === 'length') return 0;
@@ -928,13 +1090,20 @@
             const v = Reflect.get(t, prop, t);
             return typeof v === 'function' ? v.bind(t) : v;
           },
-          has () { return false; }
+          has () { return false; },
+          ownKeys () { return []; },
+          getOwnPropertyDescriptor (t, prop) {
+            if (prop === 'length') {
+              return { value: 0, writable: false, enumerable: false, configurable: true };
+            }
+            return undefined;
+          }
         });
         Object.defineProperty(navigator, 'plugins', {
-          get: () => emptyView(realPlugins), enumerable: true, configurable: true
+          get: () => emptyView(realPlugins), enumerable: false, configurable: true
         });
         Object.defineProperty(navigator, 'mimeTypes', {
-          get: () => emptyView(realMimeTypes), enumerable: true, configurable: true
+          get: () => emptyView(realMimeTypes), enumerable: false, configurable: true
         });
 
         log('[shapeshift][page][sensors] Hooks installed');
@@ -952,7 +1121,7 @@
         const spoofedTouch = touchCaps[hashString(seed + ':touch') % touchCaps.length];
 
         Object.defineProperty(navigator, 'maxTouchPoints', {
-          get: () => spoofedTouch, enumerable: true, configurable: true
+          get: () => spoofedTouch, enumerable: false, configurable: true
         });
 
         const shouldHaveTouch = spoofedTouch > 0;
@@ -1016,18 +1185,25 @@
         const majorMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
         const major = majorMatch ? majorMatch[1] : '126';
 
+        // P0: a real UA build number is a 4-part Chrome version such as
+        // 126.0.6478.127; the old 'major.0.0.0' shape does not exist in the wild
+        // and was a one-line oracle. Derive a stable, plausible build from the
+        // seed instead.
+        const buildHash = hashString(seed + ':uabuild');
+        const build = 6000 + (buildHash % 500);
+        const patch = (buildHash >>> 8) % 200;
         const uaGet = () =>
           'Mozilla/5.0 (' + persona.ua + ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
-          major + '.0.0.0 Safari/537.36';
+          major + '.0.' + build + '.' + patch + ' Safari/537.36';
 
         Object.defineProperty(navigator, 'userAgent', {
-          get: uaGet, enumerable: true, configurable: true
+          get: uaGet, enumerable: false, configurable: true
         });
         Object.defineProperty(navigator, 'appVersion', {
-          get: () => uaGet().replace('Mozilla/', ''), enumerable: true, configurable: true
+          get: () => uaGet().replace('Mozilla/', ''), enumerable: false, configurable: true
         });
         Object.defineProperty(navigator, 'platform', {
-          get: () => persona.platform, enumerable: true, configurable: true
+          get: () => persona.platform, enumerable: false, configurable: true
         });
 
         if (navigator.userAgentData) {
@@ -1035,23 +1211,40 @@
           const brands = persona.brands.map((brand, i) => ({
             brand, version: i === persona.brands.length - 1 ? '99' : major
           }));
+          // P0: platformVersion was hard-coded to '10.0.0' for every OS (a
+          // Windows-only string on macOS/Linux builds), the version list held
+          // only majors, and `mobile` passed the real value through even when
+          // the persona claims a desktop platform. All four are high-entropy
+          // oracles, so derive them from the persona.
+          const platformVersion = persona.platform === 'Win32' ? '10.0.0'
+            : (persona.platform === 'MacIntel' ? '10.15.7' : '6.6.0');
+          const fullVersionList = brands.map((b) => ({
+            brand: b.brand,
+            version: b.version + '.0.' + build + '.' + patch
+          }));
+
           Object.defineProperty(navigator, 'userAgentData', {
             get: () => new Proxy(realUAD, {
               get (target, prop) {
                 if (prop === 'brands') return brands;
+                if (prop === 'mobile') return false;
                 if (prop === 'platform') return persona.platform === 'MacIntel' ? 'macOS'
                   : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
                 if (prop === 'getHighEntropyValues') {
                   return (hints) => target.getHighEntropyValues(hints).then((values) => {
-                    values.platformVersion = '10.0.0';
-                    values.fullVersionList = brands;
-                    return values;
+                    const out = Object.assign({}, values);
+                    out.platformVersion = platformVersion;
+                    out.fullVersionList = fullVersionList;
+                    out.platform = persona.platform === 'MacIntel' ? 'macOS'
+                      : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
+                    out.mobile = false;
+                    return out;
                   });
                 }
                 const v = Reflect.get(target, prop, target);
                 return typeof v === 'function' ? v.bind(target) : v;
               }
-            }), enumerable: true, configurable: true
+            }), enumerable: false, configurable: true
           });
         }
 
@@ -1085,9 +1278,16 @@
           const origIsTypeSupported = MediaSource.isTypeSupported;
           MediaSource.isTypeSupported = function (type) {
             const result = origIsTypeSupported.call(this, type);
+            // P0: flipping a supported codec to unsupported made the player pick
+            // a codec the machine cannot actually decode, so playback failed.
+            // Only ever claim an UNSUPPORTED format is supported, and only for
+            // a narrow deterministic slice, so the page still finds a playable
+            // codec.
             const nonCritical = ['av01', 'vp9', 'opus'];
-            if (nonCritical.some((c) => String(type).includes(c)) && roll('mstype', type) < 0.05) {
-              return !result;
+            if (result === false &&
+                nonCritical.some((c) => String(type).includes(c)) &&
+                roll('mstype', type) < 0.05) {
+              return true;
             }
             return result;
           };
@@ -1099,7 +1299,10 @@
             return origDecodingInfo.call(this, configuration).then((info) => {
               if (info.powerEfficient !== undefined &&
                   roll('power', JSON.stringify(configuration)) < 0.1) {
-                info.powerEfficient = !info.powerEfficient;
+                // P0: never mutate the object the UA returned - it may be a
+                // cached/shared instance, so writing into it leaked the change
+                // to later callers. Copy first, then flip.
+                return Object.assign({}, info, { powerEfficient: !info.powerEfficient });
               }
               return info;
             });
@@ -1132,6 +1335,23 @@
           const orig = RTCRtpReceiver.getCapabilities;
           RTCRtpReceiver.getCapabilities = function (kind) {
             return stableSwap(orig.call(this, kind), 'rtp-receiver');
+          };
+        }
+
+        // P2: MediaRecorder.isTypeSupported was never owned by MAIN, so the
+        // page could read the real recorder codec list. Upgrade-only, exactly
+        // like MediaSource.isTypeSupported: never claim a working codec is
+        // missing, or recording breaks.
+        if (window.MediaRecorder && window.MediaRecorder.isTypeSupported) {
+          const origRecorderSupported = window.MediaRecorder.isTypeSupported;
+          window.MediaRecorder.isTypeSupported = function (type) {
+            const result = origRecorderSupported.call(this, type);
+            if (result === false &&
+                /(opus|vp8|vp9|av01|mp4a)/i.test(String(type)) &&
+                roll('rectype', type) < 0.05) {
+              return true;
+            }
+            return result;
           };
         }
 
@@ -1172,18 +1392,18 @@
           const shifted = shift(real.latitude, real.longitude);
           const coords = Object.create(Object.getPrototypeOf(real));
           Object.defineProperties(coords, {
-            latitude: { get: () => shifted.latitude, enumerable: true, configurable: true },
-            longitude: { get: () => shifted.longitude, enumerable: true, configurable: true },
-            accuracy: { get: () => real.accuracy, enumerable: true, configurable: true },
-            altitude: { get: () => real.altitude, enumerable: true, configurable: true },
-            altitudeAccuracy: { get: () => real.altitudeAccuracy, enumerable: true, configurable: true },
-            heading: { get: () => real.heading, enumerable: true, configurable: true },
-            speed: { get: () => real.speed, enumerable: true, configurable: true }
+            latitude: { get: () => shifted.latitude, enumerable: false, configurable: true },
+            longitude: { get: () => shifted.longitude, enumerable: false, configurable: true },
+            accuracy: { get: () => real.accuracy, enumerable: false, configurable: true },
+            altitude: { get: () => real.altitude, enumerable: false, configurable: true },
+            altitudeAccuracy: { get: () => real.altitudeAccuracy, enumerable: false, configurable: true },
+            heading: { get: () => real.heading, enumerable: false, configurable: true },
+            speed: { get: () => real.speed, enumerable: false, configurable: true }
           });
           const copy = Object.create(Object.getPrototypeOf(position));
           Object.defineProperties(copy, {
-            coords: { get: () => coords, enumerable: true, configurable: true },
-            timestamp: { get: () => position.timestamp, enumerable: true, configurable: true }
+            coords: { get: () => coords, enumerable: false, configurable: true },
+            timestamp: { get: () => position.timestamp, enumerable: false, configurable: true }
           });
           return copy;
         }
@@ -1220,7 +1440,7 @@
     if (config.enableDetectionResistance) {
       try {
         Object.defineProperty(navigator, 'webdriver', {
-          get: () => false, enumerable: true, configurable: true
+          get: () => false, enumerable: false, configurable: true
         });
 
         if (navigator.permissions && navigator.permissions.query) {
@@ -1240,10 +1460,132 @@
             });
           };
         }
+        // P0: storage.estimate and queryUsageAndQuota were ISOLATED-only, so
+        // the page could still read the restricted incognito quota. Normalize
+        // them here, keyed on (seed, input) so two reads agree.
+        if (navigator.storage && navigator.storage.estimate) {
+          const origEstimate = navigator.storage.estimate;
+          navigator.storage.estimate = function () {
+            return origEstimate.call(this).then(function (estimate) {
+              const out = Object.assign({}, estimate);
+              if (out.quota && out.quota < 1024 * 1024 * 1024) {
+                out.quota = 10 * 1024 * 1024 * 1024 +
+                  (hashString(seed + ':quota:granted:' + out.quota) % (1024 * 1024 * 1024));
+              }
+              if (out.usage !== undefined) {
+                out.usage += hashString(seed + ':quota:usage:' + out.usage) % (100 * 1024 * 1024);
+              }
+              return out;
+            });
+          };
+        }
+
+        if (navigator.webkitTemporaryStorage &&
+            navigator.webkitTemporaryStorage.queryUsageAndQuota) {
+          const origQuota = navigator.webkitTemporaryStorage.queryUsageAndQuota;
+          navigator.webkitTemporaryStorage.queryUsageAndQuota = function (success, error) {
+            if (typeof success !== 'function') return origQuota.apply(this, arguments);
+            return origQuota.call(this, function (used, granted) {
+              const normalizedGranted = Math.max(granted, 1024 * 1024 * 1024);
+              const normalizedUsed = used + (hashString(seed + ':quota:used:' + used) % (1024 * 1024));
+              return success(normalizedUsed, normalizedGranted);
+            }, error);
+          };
+        }
+
+        // document.hidden / visibilityState were ISOLATED-only, which meant the
+        // page could read the untouched native descriptors (owner/patch-state
+        // oracle). Re-assert them here so MAIN is the single owner, but keep the
+        // REAL values: rewriting them breaks every visibility-driven app. The
+        // shadows are non-enumerable and configurable, exactly like the native
+        // accessors they replace.
+        const hiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+        if (hiddenDesc && hiddenDesc.get) {
+          Object.defineProperty(Document.prototype, 'hidden', {
+            get: function () { return hiddenDesc.get.call(this); },
+            enumerable: false,
+            configurable: true
+          });
+        }
+        const visibilityDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+        if (visibilityDesc && visibilityDesc.get) {
+          Object.defineProperty(Document.prototype, 'visibilityState', {
+            get: function () { return visibilityDesc.get.call(this); },
+            enumerable: false,
+            configurable: true
+          });
+        }
+
         log('[shapeshift][page][detection] Hooks installed');
       } catch (e) {
         log('[shapeshift][page][detection] Failed:', e);
       }
+    }
+
+    // ========================================================================
+    // P2: PATCH DETECTION - Function.prototype.toString.
+    //
+    // Every hook above replaced a native method with a JS closure. The default
+    // toString() prints that closure's source, so one call to
+    // `navigator.mediaDevices.enumerateDevices.toString()` reveals both the
+    // shim and its logic. Real native methods print
+    // `function X() { [native code] }`. Answer that string for the functions
+    // actually replaced here, and only those, so unrelated page functions and
+    // the page's own wrappers are untouched.
+    // ========================================================================
+    try {
+      const nativeFns = new WeakSet();
+      const registerNative = (obj, key) => {
+        try {
+          if (obj && typeof obj[key] === 'function') nativeFns.add(obj[key]);
+        } catch (e) { /* ignore */ }
+      };
+
+      registerNative(window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype, 'getImageData');
+      registerNative(window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype, 'measureText');
+      registerNative(window.HTMLCanvasElement && HTMLCanvasElement.prototype, 'toDataURL');
+      registerNative(window.HTMLCanvasElement && HTMLCanvasElement.prototype, 'toBlob');
+      registerNative(window.AudioBuffer && AudioBuffer.prototype, 'getChannelData');
+      registerNative(window.HTMLMediaElement && HTMLMediaElement.prototype, 'canPlayType');
+      registerNative(window.MediaSource, 'isTypeSupported');
+      registerNative(window.MediaRecorder, 'isTypeSupported');
+      registerNative(window.AnalyserNode && window.AnalyserNode.prototype, 'getFloatFrequencyData');
+      registerNative(window.AnalyserNode && window.AnalyserNode.prototype, 'getByteFrequencyData');
+      registerNative(window.OffscreenCanvasRenderingContext2D &&
+        window.OffscreenCanvasRenderingContext2D.prototype, 'getImageData');
+      registerNative(navigator.mediaDevices, 'enumerateDevices');
+      registerNative(navigator.storage, 'estimate');
+      registerNative(navigator.permissions, 'query');
+      registerNative(window, 'matchMedia');
+      registerNative(window.RTCPeerConnection && window.RTCPeerConnection.prototype, 'setLocalDescription');
+      registerNative(window.WebGLRenderingContext && WebGLRenderingContext.prototype, 'getParameter');
+      registerNative(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype, 'getParameter');
+      registerNative(window.WebGLRenderingContext && WebGLRenderingContext.prototype, 'getShaderPrecisionFormat');
+      registerNative(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype, 'getShaderPrecisionFormat');
+      registerNative(window.WebGLRenderingContext && WebGLRenderingContext.prototype, 'getSupportedExtensions');
+      registerNative(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype, 'getSupportedExtensions');
+      registerNative(window.AudioBuffer && AudioBuffer.prototype, 'getChannelData');
+
+      const origFnToString = Function.prototype.toString;
+      const nativeToString = function () {
+        if (typeof this === 'function' && nativeFns.has(this)) {
+          const name = this.name ? this.name : '';
+          return 'function ' + name + '() { [native code] }';
+        }
+        return origFnToString.call(this);
+      };
+      nativeFns.add(nativeToString);
+      try {
+        // Must be non-enumerable: a plain assignment would create an own
+        // enumerable property on Function.prototype itself.
+        Object.defineProperty(Function.prototype, 'toString', {
+          value: nativeToString, enumerable: false, configurable: true, writable: true
+        });
+      } catch (e) { /* ignore */ }
+
+      log('[shapeshift][page][stealth] toString guard installed');
+    } catch (e) {
+      log('[shapeshift][page][stealth] Failed:', e);
     }
 
     log('[shapeshift][page] All hooks installed successfully');

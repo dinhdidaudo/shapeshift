@@ -66,8 +66,8 @@ Removing the extension removes all of it.
   whitelisted and clamped as a defence-in-depth measure. When
   `crypto.getRandomValues` is unavailable the injector generates no nonce and
   falls back to the one-shot latch plus the whitelist.
-- `web_accessible_resources` exposes the page-world self-test helper
-  (`content/test_fingerprint_page.js`) to `https://*/*`. A determined site can
-  probe that URL to detect the extension. The hooks themselves do not depend on
-  that exposure; it exists only so the built-in fingerprint self-test can sample
-  WebGL from the page context.
+- `web_accessible_resources` is empty. It used to expose a page-world self-test
+  helper to `https://*/*`, which let any site that guessed the URL probe for the
+  extension. That helper has been deleted outright: the MAIN-world injector owns
+  the WebGL surface now, so the self-test samples it from the ISOLATED world
+  (`content/test_fingerprint.js`) and nothing needs to be web-accessible.

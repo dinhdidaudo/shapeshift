@@ -5,7 +5,6 @@
 
   installers.push(function installUserAgentHooks (env) {
     if (!env || !env.config?.enableUserAgentProtection) return;
-    const prng = env.prngFor ? env.prngFor('useragent') : env.prng;
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -33,10 +32,13 @@
     const uaBuildVariation = Math.floor(personaRoll('build') * 3) - 1; // -1..+1
 
     // Common platform strings
+    // P1: MacPPC and armv7l are PowerPC/32-bit ARM strings that no current
+    // Chrome build reports; advertising one is a fingerprint that does not
+    // exist in the real population.
     const platforms = {
       windows: ['Win32', 'Win64'],
-      mac: ['MacIntel', 'MacPPC'],
-      linux: ['Linux x86_64', 'Linux i686', 'Linux armv7l'],
+      mac: ['MacIntel'],
+      linux: ['Linux x86_64', 'Linux i686'],
       other: ['Win32', 'MacIntel'] // Fallback
     };
 
@@ -49,7 +51,11 @@
 
     // Select a platform variant from the same category
     const platformOptions = platforms[platformCategory] || platforms.other;
-    const spoofedPlatform = platformOptions[Math.floor(prng() * platformOptions.length)];
+    // P1: this used to draw from the streaming PRNG, so two loads of the same
+    // origin advertised a different platform each time. Key it on the seed
+    // like every other surface so the persona is stable per origin.
+    const spoofedPlatform = platformOptions[
+      Math.floor(personaRoll('platform') * platformOptions.length) % platformOptions.length];
 
     log(`[shapeshift][useragent] Original platform: ${origPlatform}, Spoofed: ${spoofedPlatform}`);
 
@@ -68,7 +74,7 @@
             }
             return spoofedPlatform;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.platform hooked');
@@ -113,7 +119,7 @@
             }
             return modifiedUserAgent;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.userAgent hooked');
@@ -154,7 +160,7 @@
             }
             return modifiedAppVersion;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.appVersion hooked');
@@ -178,7 +184,7 @@
             // Keep same OS but slight variation
             return origOscpu;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.oscpu hooked');
@@ -200,7 +206,7 @@
             // Keep same vendor to avoid breaking sites
             return origVendor;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.vendor hooked');
@@ -283,7 +289,7 @@
             }
             return proxiedUserAgentData;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][useragent] navigator.userAgentData hooked');

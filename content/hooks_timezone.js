@@ -6,7 +6,6 @@
 
   installers.push(function installTimezoneHooks (env) {
     if (!env || !env.config?.enableTimezoneProtection) return;
-    const prng = env.prngFor ? env.prngFor('timezone') : env.prng;
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -105,8 +104,16 @@
     let spoofedTimezone = null;
 
     if (availableZones.length > 0) {
-      // Pick a random timezone from the same offset group
-      spoofedTimezone = availableZones[Math.floor(prng() * availableZones.length)];
+      // P1: this used to draw from the streaming PRNG, so the same page got a
+      // different zone on every load while getTimezoneOffset() stayed real -
+      // a rotating zone is itself a fingerprint. Key the pick on (seed, offset)
+      // so it is stable per origin and changes only when the origin does.
+      const tzHash = globalThis.ssHashString;
+      const tzSeed = (env.seed >>> 0) || 0;
+      const pick = tzHash
+        ? tzHash(tzSeed + ':tz:' + offsetKey) % availableZones.length
+        : 0;
+      spoofedTimezone = availableZones[pick];
       log(`[shapeshift][timezone] Real offset: ${realOffset}, Spoofed timezone: ${spoofedTimezone}`);
     } else {
       log(`[shapeshift][timezone] No alternative timezones for offset ${realOffset}, protection disabled`);

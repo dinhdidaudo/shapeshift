@@ -61,7 +61,6 @@
                 "content/hooks_media.js",
                 "content/hooks_geolocation.js",
                 "content/hooks_detection.js",
-                "content/test_fingerprint.js",
                 "content/bootstrap.js",
                 "content/stats_tracker.js",
                 "content/content_main.js"
@@ -80,14 +79,5 @@
             "world": "MAIN"
         }
     ],
-    "web_accessible_resources": [
-        {
-            "resources": [
-                "content/test_fingerprint_page.js"
-            ],
-            "matches": [
-                "<all_urls>"
-            ]
-        }
-    ]
+    "web_accessible_resources": []
 }

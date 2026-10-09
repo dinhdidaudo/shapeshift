@@ -59,7 +59,7 @@
 
         if (maskVendors && vendorParams.includes(p) && typeof value === "string") {
           const suffix = stableSuffix(p, value);
-          const out = value + " (fp-" + suffix + ")";
+          const out = value + " (ss-" + suffix + ")";
           log("[shapeshift][webgl][cs] vendor", value, "->", out);
           return out;
         }

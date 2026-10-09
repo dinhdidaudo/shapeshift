@@ -5,7 +5,15 @@
 
   installers.push(function installScreenHooks (env) {
     if (!env || !env.config?.enableScreenProtection) return;
-    const prng = env.prngFor ? env.prngFor('screen') : env.prng;
+    // P1: every draw below used the streaming PRNG, so the advertised screen
+    // changed on each load of the same origin and disagreed with the MAIN
+    // world. Key each pick on (seed, field) so it is stable per origin.
+    const screenSeed = (env.seed >>> 0) || 0;
+    const screenRoll = (field) => {
+      const h = globalThis.ssHashString;
+      if (!h) return 0.5;
+      return h(screenSeed + ':screen:' + field) / 4294967296;
+    };
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -33,7 +41,7 @@
 
     // Sample from distribution
     function sampleResolution() {
-      const r = prng();
+      const r = screenRoll('resolution');
       let cumulative = 0;
       for (const res of commonResolutions) {
         cumulative += res.weight;
@@ -57,8 +65,8 @@
         spoofedResolution = sampleResolution();
       } else {
         // Slight modification of actual resolution
-        const widthOffset = Math.floor((prng() - 0.5) * 100);
-        const heightOffset = Math.floor((prng() - 0.5) * 100);
+        const widthOffset = Math.floor((screenRoll('widthOffset') - 0.5) * 100);
+        const heightOffset = Math.floor((screenRoll('heightOffset') - 0.5) * 100);
         spoofedResolution = {
           width: Math.max(800, baseWidth + widthOffset),
           height: Math.max(600, baseHeight + heightOffset)
@@ -77,7 +85,8 @@
 
       // Common color depths: 24 (most common), 30, 32
       const colorDepths = [24, 24, 24, 30, 32]; // Weighted toward 24
-      const spoofedColorDepth = colorDepths[Math.floor(prng() * colorDepths.length)];
+      const spoofedColorDepth = colorDepths[
+        Math.floor(screenRoll('colorDepth') * colorDepths.length) % colorDepths.length];
 
       log(`[shapeshift][screen] Original: ${baseWidth}x${baseHeight}, Spoofed: ${spoofedResolution.width}x${spoofedResolution.height}`);
       log(`[shapeshift][screen] Pixel ratio: ${basePixelRatio} → ${spoofedPixelRatio}, Color depth: ${spoofedColorDepth}`);
@@ -104,7 +113,10 @@
               }
               return getter.call(this);
             },
-            enumerable: true,
+            // Native screen getters are non-enumerable; leaving this true made
+            // Object.keys(screen) return width/height/... instead of [] - a
+            // one-line detector.
+            enumerable: false,
             configurable: true
           });
         } catch (e) {

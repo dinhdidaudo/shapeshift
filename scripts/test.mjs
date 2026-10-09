@@ -123,19 +123,20 @@ const missingStream = surfaceHooks.filter((id) => {
 });
 assert('every surface hook requests its own stream', missingStream.length === 0, missingStream.join(', '));
 
-section('MAIN-world PRNG parity');
-// P1 2.23: the MAIN world cannot load core/prng.js, so Xoshiro128** is inlined
-// in page_world_injector.js. Pin the copy against core so the two cannot drift.
-const inlined = injectorSrc.match(/function createPRNG[\s\S]*?\n  \}/);
-assert('MAIN-world injector inlines createPRNG', !!inlined);
-if (inlined) {
-  const factory = new Function(inlined[0] + '\nreturn createPRNG;')();
-  const a = prng.ssCreatePRNG(0x1234ABCD);
-  const b = factory(0x1234ABCD);
-  let same = true;
-  for (let i = 0; i < 64; i++) { if (a() !== b()) { same = false; break; } }
-  assert('inlined PRNG matches core/prng.js', same);
-}
+section('MAIN-world determinism');
+// P1: the MAIN world used to inline a Xoshiro128** copy of core/prng.js and
+// draw every spoofed value from that one stream. A stream advances once per
+// read, so calling navigator.hardwareConcurrency twice returned two different
+// numbers - a one-line oracle that the ISOLATED hooks, which hash the same
+// (seed, field) pair, would not have shown. The injector now hashes
+// (seed, surface, field) per read and holds no per-load RNG state at all, so
+// the pinned property is the absence of a stream, not parity with core.
+assert('MAIN-world injector no longer inlines createPRNG', injectorSrc.indexOf('function createPRNG') === -1);
+assert('MAIN-world injector never draws from a streaming PRNG', !/\bprng\s*\(/.test(injectorSrc));
+assert('MAIN-world injector hashes its per-read values',
+  injectorSrc.includes("hashString(seed + ':screen:resolution')") &&
+  injectorSrc.includes("hashString(seed + ':nav:cores')") &&
+  injectorSrc.includes("hashString(seed + ':tz:' + offsetKey)"));
 
 section('MAIN-world config sanitation');
 // P1 2.14: sanitizeConfig() used to copy every boolean/number key out of a

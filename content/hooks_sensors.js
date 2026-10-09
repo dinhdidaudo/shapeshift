@@ -5,8 +5,18 @@
 
   installers.push(function installSensorHooks (env) {
     if (!env || !env.config?.enableSensorProtection) return;
-    const prng = env.prngFor ? env.prngFor('sensors') : env.prng;
-    const { noise, config } = env;
+    // P0: memory/downlink getters used the streaming `noise()` helper, so every
+    // read of performance.memory returned a different value and the "jitter"
+    // drifted without bound - a trivial oracle. Key each field on (seed, field,
+    // base) so repeated reads agree, exactly like the MAIN world does.
+    const sensorSeed = (env.seed >>> 0) || 0;
+    const hashString = globalThis.ssHashString;
+    const fieldNoise = (field, base, scale) => {
+      if (!hashString) return 0;
+      const h = hashString(sensorSeed + ':sensor:' + field + ':' + base);
+      return ((h / 4294967296) - 0.5) * scale;
+    };
+    const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -42,7 +52,7 @@
           // event-target identity and the other listeners stay intact. A plain
           // object literal failed `instanceof BatteryManager` and dropped every
           // property this file did not enumerate by hand.
-          const spoofedLevel = Math.max(0.5, Math.min(1.0, 0.75 + noise(0.1)));
+          const spoofedLevel = Math.max(0.5, Math.min(1.0, 0.75 + fieldNoise('batterylevel', 0.75, 0.1)));
           // P1 2.6: chargingTime/dischargingTime used to be hard-coded to
           // 0 / Infinity regardless of the real state, which contradicted the
           // chargingchange and levelchange events this proxy still forwards
@@ -90,26 +100,26 @@
           if (globalThis.ssTimingUtils) {
             globalThis.ssTimingUtils.randomDelaySync();
           }
-          return Math.floor(baseLimit + noise(baseLimit * 0.05));
+          return Math.floor(baseLimit + fieldNoise('memlimit', baseLimit, baseLimit * 0.05));
         },
         get totalJSHeapSize() {
           if (globalThis.ssTimingUtils) {
             globalThis.ssTimingUtils.randomDelaySync();
           }
-          return Math.floor(baseUsed * 1.5 + noise(baseUsed * 0.1));
+          return Math.floor(baseUsed * 1.5 + fieldNoise('memtotal', baseUsed, baseUsed * 0.1));
         },
         get usedJSHeapSize() {
           if (globalThis.ssTimingUtils) {
             globalThis.ssTimingUtils.randomDelaySync();
           }
-          return Math.floor(baseUsed + noise(baseUsed * 0.1));
+          return Math.floor(baseUsed + fieldNoise('memused', baseUsed, baseUsed * 0.1));
         }
       };
 
       try {
         Object.defineProperty(performance, 'memory', {
           get: () => noisedMemory,
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][sensors] performance.memory hooked');
@@ -136,7 +146,14 @@
       if (!connection) return;
 
       const connectionTypes = ['4g', '4g', '4g', 'wifi', 'wifi']; // Weighted
-      const spoofedType = connectionTypes[Math.floor(prng() * connectionTypes.length)];
+      // P0: the streaming PRNG made the advertised connection type change on
+      // every load of the same origin, and it disagreed with the MAIN world
+      // (which keys on the seed). Derive the pick from the shared hash instead.
+      const connSeed = (env.seed >>> 0) || 0;
+      const connHash = globalThis.ssHashString
+        ? globalThis.ssHashString(connSeed + ':conn')
+        : connSeed;
+      const spoofedType = connectionTypes[connHash % connectionTypes.length];
       const spoofedDownlink = spoofedType === 'wifi' ? 10 : 5; // Mbps
 
       try {
@@ -147,7 +164,7 @@
             }
             return spoofedType;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
 
@@ -156,9 +173,9 @@
             if (globalThis.ssTimingUtils) {
               globalThis.ssTimingUtils.randomDelaySync();
             }
-            return spoofedDownlink + noise(1);
+            return spoofedDownlink + fieldNoise('downlink', spoofedDownlink, 1);
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
 
@@ -236,36 +253,42 @@
         // Chrome's PluginArray is not constructible, so shadow the two
         // properties with the genuine objects but suppress their contents by
         // returning the empty native-like view via a Proxy.
-        const emptyPlugins = new Proxy(realPlugins, {
-          get (t, prop) {
-            if (prop === 'length') return 0;
-            if (prop === 'item' || prop === 'namedItem') return () => null;
-            if (prop === Symbol.iterator) return function* () {};
-            const v = Reflect.get(t, prop, t);
-            return typeof v === 'function' ? v.bind(t) : v;
-          },
-          has () { return false; }
-        });
+        // P0: without ownKeys/getOwnPropertyDescriptor, Object.getOwnPropertyNames
+        // and Object.keys still walked the REAL plugin indices, leaking the
+        // exact plugin set this proxy claims to hide. The `has: false` trap was
+        // also inconsistent with length === 0.
+        function makeEmptyView (real) {
+          return new Proxy(real, {
+            get (t, prop) {
+              if (prop === 'length') return 0;
+              if (prop === 'item' || prop === 'namedItem') return () => null;
+              if (prop === Symbol.iterator) return function* () {};
+              if (prop === Symbol.toStringTag) return 'PluginArray';
+              const v = Reflect.get(t, prop, t);
+              return typeof v === 'function' ? v.bind(t) : v;
+            },
+            has () { return false; },
+            ownKeys () { return []; },
+            getOwnPropertyDescriptor (t, prop) {
+              if (prop === 'length') {
+                return { value: 0, writable: false, enumerable: false, configurable: true };
+              }
+              return undefined;
+            }
+          });
+        }
 
-        const emptyMimeTypes = new Proxy(realMimeTypes, {
-          get (t, prop) {
-            if (prop === 'length') return 0;
-            if (prop === 'item' || prop === 'namedItem') return () => null;
-            if (prop === Symbol.iterator) return function* () {};
-            const v = Reflect.get(t, prop, t);
-            return typeof v === 'function' ? v.bind(t) : v;
-          },
-          has () { return false; }
-        });
+        const emptyPlugins = makeEmptyView(realPlugins);
+        const emptyMimeTypes = makeEmptyView(realMimeTypes);
 
         Object.defineProperty(navigator, 'plugins', {
           get: () => emptyPlugins,
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         Object.defineProperty(navigator, 'mimeTypes', {
           get: () => emptyMimeTypes,
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
 

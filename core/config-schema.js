@@ -33,6 +33,10 @@
     enableGeolocationProtection: true,
     geolocation: { noiseLevel: 0.001 },
     enableDetectionResistance: true,
+    // P2: the Options page and the hooks both referenced a timing-jitter knob
+    // that never existed in the schema, so reading it always produced
+    // `undefined` and the switch silently did nothing. Declare it once here.
+    timingJitter: 0,
     useStrongKDF: true, kdfIterations: 1000, useGaussianNoise: true,
     autoRotateFingerprint: false, rotationIntervalHours: 24, rotateOnStartup: false,
     // Security §3: rotation used to reload every open tab and raise an OS

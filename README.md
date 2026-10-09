@@ -24,19 +24,19 @@ Built from the ground up with a premium control-room interface: deep-space glass
 
 | API | Protection method |
 |-----|-------------------|
-| Canvas | Pixel-level Gaussian noise |
-| WebGL | Parameter jittering, vendor masking |
-| Audio | Audio context sample noise |
-| Fonts | Measurement randomization |
-| Screen | Resolution spoofing from a real-world distribution |
-| Navigator | Hardware concurrency and memory fuzzing |
+| Canvas | Pixel-level Gaussian noise, including `OffscreenCanvas` |
+| WebGL | Parameter jittering, vendor masking, extension shuffling |
+| Audio | `AudioBuffer` sample noise and `AnalyserNode` frequency noise |
+| Fonts | Measurement randomization and `FontFaceSet.check` permutation |
+| Screen | Resolution spoofing plus `availLeft` / `availTop` / color depth |
+| Navigator | Hardware concurrency, memory, plugins and mime types |
 | Timezone | IANA zone switching with identical UTC offset |
-| WebRTC | IP leak prevention, SDP randomization |
-| Sensors | Motion and orientation noise |
+| WebRTC | SDP scrubbing, host candidate removal, device enumeration masking |
+| Sensors | Battery, network and `KeyboardEvent.getModifierState` shaping |
 | Touch | Contact geometry jitter |
-| Media | Device enumeration masking |
+| Media | Device enumeration masking, `MediaSource` / `MediaRecorder` codec upgrade-only |
 | Geolocation | Coarse coordinate perturbation |
-| Detection | Headless and automation signal suppression |
+| Detection | Headless signal suppression, storage quota normalization, `document.hidden` / `visibilityState` ownership, `Function.prototype.toString` guard |
 
 ## Installation
 

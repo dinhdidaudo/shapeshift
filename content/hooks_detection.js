@@ -5,7 +5,11 @@
 
   installers.push(function installDetectionResistanceHooks (env) {
     if (!env || !env.config?.enableDetectionResistance) return;
-    const prng = env.prngFor ? env.prngFor('detection') : env.prng;
+    // P0: this file used a streaming `prng()` for every quota read, so two
+    // consecutive estimate() calls disagreed and the "normalized" quota drifted
+    // on each read - a one-line oracle. Key every value on its input instead.
+    const seed = env.seed >>> 0;
+    const hashString = globalThis.ssHashString || (() => 0);
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
@@ -41,7 +45,8 @@
               // Normalize quota to appear as normal browsing
               // Incognito typically has lower quota
               const normalizedGranted = Math.max(grantedBytes, 1024 * 1024 * 1024); // At least 1GB
-              const normalizedUsed = Math.floor(usedBytes + (prng() * 1024 * 1024)); // Add some random usage
+              const normalizedUsed = Math.floor(
+                usedBytes + (hashString(seed + ':quota:used:' + usedBytes) % (1024 * 1024)));
 
               log(`[shapeshift][detection] Normalized quota: ${grantedBytes} → ${normalizedGranted}`);
 
@@ -73,19 +78,26 @@
 
           const estimate = await origEstimate.call(this);
 
+          // P0: never write into the object the UA handed back - it can be a
+          // cached/shared record, and mutating it made the change leak into
+          // later callers and into the page's own reads. Build a copy.
+          const out = Object.assign({}, estimate);
+
           // Normalize quota to appear as normal mode
           // Incognito mode often has restricted quota
-          if (estimate.quota && estimate.quota < 1024 * 1024 * 1024) {
-            estimate.quota = Math.floor(10 * 1024 * 1024 * 1024 + (prng() * 1024 * 1024 * 1024)); // 10-11 GB
-            log(`[shapeshift][detection] Normalized storage quota to ${(estimate.quota / 1024 / 1024 / 1024).toFixed(2)} GB`);
+          if (out.quota && out.quota < 1024 * 1024 * 1024) {
+            const quotaHash = hashString(seed + ':quota:granted:' + out.quota);
+            out.quota = Math.floor(10 * 1024 * 1024 * 1024 + (quotaHash % (1024 * 1024 * 1024))); // 10-11 GB
+            log(`[shapeshift][detection] Normalized storage quota to ${(out.quota / 1024 / 1024 / 1024).toFixed(2)} GB`);
           }
 
-          // Add some random usage
-          if (estimate.usage !== undefined) {
-            estimate.usage = Math.floor(estimate.usage + (prng() * 100 * 1024 * 1024)); // Add 0-100 MB
+          // Add a stable amount of usage for the same reported value.
+          if (out.usage !== undefined) {
+            out.usage = Math.floor(
+              out.usage + (hashString(seed + ':quota:usage:' + out.usage) % (100 * 1024 * 1024)));
           }
 
-          return estimate;
+          return out;
         };
 
         log('[shapeshift][detection] navigator.storage.estimate hooked');
@@ -139,7 +151,7 @@
             }
             return false;
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
         log('[shapeshift][detection] navigator.webdriver hooked');
@@ -198,7 +210,7 @@
             }
             return origHiddenGetter.call(this);
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
       }
@@ -213,7 +225,7 @@
             }
             return origVisibilityStateGetter.call(this);
           },
-          enumerable: true,
+          enumerable: false,
           configurable: true
         });
       }
