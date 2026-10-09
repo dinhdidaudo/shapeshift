@@ -474,7 +474,13 @@ section('network guard');
 // The rule table below is the same shape used by the lint pass; the URLs in
 // comments are ignored by stripping line comments first.
 const NETWORK_API = /(^|[^.\w])(fetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon\s*\(|navigator\.serviceWorker\s*\.register)/;
-const stripLineComments = (src) => src.split(String.fromCharCode(10))
+// CRLF matters here too: there is no `m` flag, so a trailing \r defeats the
+// end-anchor and a `// ...` comment survives the strip, looking like live code.
+// On a Windows checkout that turned the URL.pathname note in
+// scripts/rename-namespace.mjs into a reported violation while the same tree
+// passed on Linux. Normalise the endings before splitting.
+const stripLineComments = (src) => src.replace(/\r\n?/g, String.fromCharCode(10))
+  .split(String.fromCharCode(10))
   .map((l) => l.replace(/\/\/.*$/, ''))
   .join(String.fromCharCode(10));
 const networkHits = [];
@@ -692,6 +698,13 @@ const pathnameHits = scriptFiles.filter((rel) => {
 pathnameHits.length === 0
   ? ok('scripts resolve ROOT without URL.pathname')
   : fail('scripts resolve ROOT without URL.pathname', pathnameHits.join(', '));
+// Positive control for the false positive the Windows runner reported: the same
+// rule must still strip a line comment when the checkout carries CRLF endings.
+const crlfProbe = 'const a = 1;' + String.fromCharCode(13) + String.fromCharCode(10) +
+  '// see the ' + '.' + 'path' + 'name' + ' note' + String.fromCharCode(13) + String.fromCharCode(10);
+!BARE_PATHNAME.test(stripLineComments(crlfProbe))
+  ? ok('line comments are stripped on a CRLF checkout')
+  : fail('line comments are stripped on a CRLF checkout');
 const rootResolver = scriptFiles.filter((rel) => /fileURLToPath\s*\(/.test(text(join(ROOT, rel))));
 rootResolver.length >= 3
   ? ok('every root-resolving script uses fileURLToPath')
