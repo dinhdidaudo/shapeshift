@@ -54,15 +54,31 @@
     safeWrap(() => {
       const shouldHaveTouch = spoofedMaxTouchPoints > 0;
 
-      // If we're spoofing as a touch device, ensure touch events exist
-      // If we're spoofing as non-touch, this is already handled by maxTouchPoints
-      if (shouldHaveTouch && !('ontouchstart' in window)) {
+      if (shouldHaveTouch) {
+        // Touch device: make sure the touch event handler properties exist.
+        if (!('ontouchstart' in window)) {
+          try {
+            window.ontouchstart = null;
+            document.ontouchstart = null;
+            log('[shapeshift][touch] Added ontouchstart support');
+          } catch (e) {
+            // May fail on some browsers
+          }
+        }
+      } else if ('ontouchstart' in window) {
+        // P2: on a real touch laptop, maxTouchPoints is spoofed to 0 but
+        // 'ontouchstart' in window stayed true — a contradiction a detector can
+        // read directly. Hide the property to match the spoofed non-touch story.
         try {
-          window.ontouchstart = null;
-          document.ontouchstart = null;
-          log('[shapeshift][touch] Added ontouchstart support');
+          delete window.ontouchstart;
+          delete document.ontouchstart;
         } catch (e) {
-          // May fail on some browsers
+          try {
+            Object.defineProperty(window, 'ontouchstart', {
+              get: () => undefined,
+              configurable: true
+            });
+          } catch (e2) { /* best effort */ }
         }
       }
     });

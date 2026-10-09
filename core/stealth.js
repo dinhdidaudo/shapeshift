@@ -1,8 +1,10 @@
 // Stealth utilities to hide extension fingerprinting.
 // Prevents detection via Symbol-based tracking and minimal global pollution.
 (function () {
-  // Use Symbols instead of string properties to avoid detection
-  const patchedMarker = Symbol('fp.patched');
+  // Use Symbols instead of string properties to avoid detection. The
+  // description is only a debugging label, but it must not resurrect the
+  // retired fp* namespace (AGENTS.md rule 2).
+  const patchedMarker = Symbol('ss.patched');
 
   // WeakMap to track patched objects without adding properties
   const patchedObjects = new WeakMap();
@@ -45,10 +47,13 @@
       // But we can make them non-enumerable
     ];
 
+    // P2: ssStatsTracker was missing from this list, so it stayed an
+    // enumerable own property of globalThis and was trivially discoverable.
     const makeNonEnumerable = [
       'ssConfig', 'ssGetSalt', 'ssDeriveSeed', 'ssHashString',
       'ssCreatePRNG', 'ssPRNG', 'ssNoise', 'ssEnv', 'ssReady',
-      'ssHookInstallers', 'ssTestFingerprint', 'ssTimingUtils'
+      'ssHookInstallers', 'ssTestFingerprint', 'ssTimingUtils',
+      'ssStatsTracker'
     ];
 
     makeNonEnumerable.forEach(prop => {
@@ -91,11 +96,14 @@
   try {
     const value = globalThis.ssStealth;
     delete globalThis.ssStealth;
+    // P2: configurable: false made cleanupGlobals() (or any later stage that
+    // needs to replace the helper) fail silently forever. It stays
+    // non-enumerable, which is the part that actually hides it from the page.
     Object.defineProperty(globalThis, 'ssStealth', {
       value: value,
-      writable: false,
+      writable: true,
       enumerable: false,
-      configurable: false
+      configurable: true
     });
   } catch (e) {
     // Ignore if fails

@@ -11,6 +11,7 @@ package-lock.json
 # Build artifacts
 dist/
 build/
+*.log
 coverage/
 .parcel-cache/
 .turbo/

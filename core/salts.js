@@ -22,10 +22,17 @@
     return Array.from(arr, n => n.toString(16).padStart(8, "0")).join("");
   }
 
+  // P2: `chrome?.storage?.local` throws ReferenceError when the binding itself
+  // is undeclared (unit tests, non-extension host). Test the name first.
+  function hasStorage () {
+    if (typeof chrome === 'undefined') return false;
+    return !!(chrome.storage && chrome.storage.local);
+  }
+
   function readSalt () {
     return new Promise((resolve, reject) => {
       try {
-        if (!chrome?.storage?.local) {
+        if (!hasStorage()) {
           resolve(null);
           return;
         }
@@ -49,7 +56,7 @@
   function writeSalt (salt) {
     return new Promise((resolve, reject) => {
       try {
-        if (!chrome?.storage?.local) {
+        if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
           resolve();
           return;
         }
@@ -110,7 +117,7 @@
   // stored one. Adopting storage changes keeps one salt per install, so the
   // "same (salt, origin, config) -> same values" contract holds across tabs.
   try {
-    if (chrome?.storage?.onChanged) {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local" || !changes[STORAGE_KEY]) return;
         const next = changes[STORAGE_KEY].newValue;

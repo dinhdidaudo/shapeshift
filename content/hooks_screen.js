@@ -65,8 +65,15 @@
         };
       }
 
-      // Determine pixel ratio (1 for normal, 2 for retina/hi-DPI)
-      const spoofedPixelRatio = spoofedResolution.width >= 2560 ? 2 : 1;
+      // P1 2.10: devicePixelRatio used to be snapped to 1 or 2 purely from the
+      // spoofed width, while window.innerWidth stayed real. screen.width / dpr
+      // then implied a CSS viewport unrelated to the actual window, which is a
+      // cheap inconsistency check. Scale the real ratio by how much the spoofed
+      // screen differs from the real one so the implied CSS screen size stays
+      // close to the real one.
+      const realScreenWidth = baseWidth || spoofedResolution.width;
+      const widthScale = realScreenWidth > 0 ? spoofedResolution.width / realScreenWidth : 1;
+      const spoofedPixelRatio = Math.min(4, Math.max(1, Math.round(basePixelRatio * widthScale * 100) / 100));
 
       // Common color depths: 24 (most common), 30, 32
       const colorDepths = [24, 24, 24, 30, 32]; // Weighted toward 24
@@ -109,8 +116,18 @@
       defineGetter(window.screen, 'width', () => spoofedResolution.width);
       defineGetter(window.screen, 'height', () => spoofedResolution.height);
 
-      // Available width/height (usually same as width/height minus taskbar)
-      const availOffset = 40; // Typical taskbar height
+      // P1 2.10: availHeight used to be height - 40 on every platform, which is
+      // wrong on macOS (no taskbar: availHeight === height) and wrong whenever
+      // the real Windows taskbar is not 40px tall. Measure the real gap between
+      // the screen and its work area (availHeight is still the native value at
+      // this point) and scale that gap to the spoofed resolution.
+      const realAvailHeight = Number(window.screen.availHeight);
+      const realGap = Number.isFinite(realAvailHeight) && realAvailHeight > 0 && realAvailHeight <= baseHeight
+        ? baseHeight - realAvailHeight
+        : 0;
+      const availOffset = realGap > 0
+        ? Math.max(1, Math.round(realGap * (spoofedResolution.height / (baseHeight || spoofedResolution.height))))
+        : 0;
       defineGetter(window.screen, 'availWidth', () => spoofedResolution.width);
       defineGetter(window.screen, 'availHeight', () => spoofedResolution.height - availOffset);
 

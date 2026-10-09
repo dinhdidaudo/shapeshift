@@ -7,6 +7,11 @@ import { execFileSync } from 'node:child_process';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const LINT = process.argv.includes('--lint');
+// The packaging build runs this gate *before* it copies the runtime tree into
+// dist/, so the freshness comparison would always fail on a stale dist/ and
+// make the build impossible to run. build.mjs passes --no-dist for that first
+// pass and then runs the full gate against the freshly written dist/.
+const SKIP_DIST = process.argv.includes('--no-dist');
 let failures = 0;
 let checks = 0;
 
@@ -275,6 +280,40 @@ brandFails.length === 0
   : fail('brand mark is unified', brandFails.slice(0, 8).join(', '));
 existsSync(join(ROOT, 'images', 'logo.svg')) ? ok('logo master present') : fail('logo master present');
 existsSync(join(ROOT, 'BRAND.md')) ? ok('BRAND.md present') : fail('BRAND.md present');
+
+section('dist freshness');
+// dist/ is a committed copy of the runtime tree. Nothing compared it against
+// the sources, so a source edit could ship while dist/ silently kept the old
+// behaviour. When dist/ exists, every runtime file must be byte-identical
+// there. A missing dist/ is reported as skipped rather than failed, because
+// loading the extension unpacked does not need build output.
+if (SKIP_DIST) {
+  ok('dist/ freshness skipped (--no-dist)');
+} else if (!existsSync(join(ROOT, 'dist'))) {
+  ok('dist/ not built (nothing to compare)');
+} else {
+  const distDirs = ['core', 'content', 'background', 'popup', 'options'];
+  const drift = [];
+  const compareDist = (rel) => {
+    const distPath = join(ROOT, 'dist', rel);
+    if (!existsSync(distPath)) { drift.push(rel + ' missing'); return; }
+    if (text(join(ROOT, rel)) !== text(distPath)) drift.push(rel + ' stale');
+  };
+  distDirs.forEach((dir) => {
+    const abs = join(ROOT, dir);
+    if (!existsSync(abs)) return;
+    readdirSync(abs).forEach((entry) => {
+      const full = join(abs, entry);
+      if (!statSync(full).isFile()) return;
+      if (['.js', '.css', '.html', '.json'].indexOf(extname(full)) === -1) return;
+      compareDist(dir + '/' + entry);
+    });
+  });
+  compareDist('manifest.json');
+  drift.length === 0
+    ? ok('dist/ matches the runtime sources')
+    : fail('dist/ matches the runtime sources', drift.slice(0, 8).join(', '));
+}
 
 // --lint adds the static checks that a plain `verify` run deliberately keeps
 // out: they are style/hazard rules, not structural contract checks. Before

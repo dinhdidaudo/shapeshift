@@ -4,8 +4,17 @@
 
   installers.push(function installWebGLHooks (env) {
     if (!env || !env.config?.enableWebGLMasking) return;
-    const prng = env.prngFor ? env.prngFor('webgl') : env.prng;
     const { config, seed } = env;
+
+    // P1 2.1: the vendor suffix must be stable across reads. It used to be
+    // drawn from a streaming PRNG, so two getParameter(VENDOR) calls returned
+    // two different strings - a one-line detector. Key it on (seed, param,
+    // value) instead, exactly like canvas/audio already do.
+    const hashString = globalThis.ssHashString;
+    function stableSuffix (param, value) {
+      if (!hashString) return 1;
+      return (hashString(((seed >>> 0) || 0) + ':webgl:' + param + ':' + value) % 0xFFFF) || 1;
+    }
     const jitter = config.webglJitter ?? 1;
     const maskVendors = config.maskWebGLVendorStrings !== false;
     const shuffleExt = config.shuffleWebGLExtensions !== false;
@@ -49,7 +58,7 @@
         ].filter(Boolean);
 
         if (maskVendors && vendorParams.includes(p) && typeof value === "string") {
-          const suffix = (prng() * 0xFFFF >>> 0) || 1;
+          const suffix = stableSuffix(p, value);
           const out = value + " (fp-" + suffix + ")";
           log("[shapeshift][webgl][cs] vendor", value, "->", out);
           return out;

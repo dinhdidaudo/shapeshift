@@ -18,6 +18,20 @@
       }
     }
 
+    // P1 2.9: the UA string, appVersion and the UA-CH fields used to draw their
+    // own independent PRNG values, so the same browser advertised four
+    // different Chrome versions - a trivial cross-check for any site that reads
+    // both navigator.userAgent and navigator.userAgentData. Derive one persona
+    // delta from (seed, platform) and reuse it everywhere.
+    const uaSeed = (env.seed >>> 0) || 0;
+    const uaHash = globalThis.ssHashString;
+    function personaRoll (label) {
+      if (!uaHash) return 0.5;
+      return uaHash(uaSeed + ':ua:' + label) / 4294967296;
+    }
+    const uaPatchVariation = Math.floor(personaRoll('patch') * 5) - 2; // -2..+2
+    const uaBuildVariation = Math.floor(personaRoll('build') * 3) - 1; // -1..+1
+
     // Common platform strings
     const platforms = {
       windows: ['Win32', 'Win64'],
@@ -75,7 +89,7 @@
         // Modify the patch version (last number) slightly
         const [full, major, minor, build, patch] = chromeMatch;
         const patchNum = parseInt(patch);
-        const variation = Math.floor(prng() * 5) - 2; // -2 to +2
+        const variation = uaPatchVariation; // -2 to +2, shared with UA-CH
         const newPatch = Math.max(0, patchNum + variation);
 
         modifiedUserAgent = origUserAgent.replace(
@@ -120,7 +134,7 @@
       if (chromeMatch) {
         const [full, major, minor, build, patch] = chromeMatch;
         const patchNum = parseInt(patch);
-        const variation = Math.floor(prng() * 5) - 2;
+        const variation = uaPatchVariation;
         const newPatch = Math.max(0, patchNum + variation);
 
         // Apply same modification to appVersion if it contains Chrome version
@@ -219,7 +233,7 @@
                 const parts = values.platformVersion.split('.');
                 if (parts.length > 0) {
                   const lastPart = parseInt(parts[parts.length - 1]);
-                  const variation = Math.floor(prng() * 3) - 1;
+                  const variation = uaBuildVariation;
                   parts[parts.length - 1] = Math.max(0, lastPart + variation);
                   values.platformVersion = parts.join('.');
                   log(`[shapeshift][useragent] Modified platformVersion: ${values.platformVersion}`);
@@ -233,7 +247,7 @@
                     const parts = item.version.split('.');
                     if (parts.length >= 4) {
                       const patch = parseInt(parts[3]);
-                      const variation = Math.floor(prng() * 5) - 2;
+                      const variation = uaPatchVariation;
                       parts[3] = Math.max(0, patch + variation);
                       return { ...item, version: parts.join('.') };
                     }
@@ -249,7 +263,7 @@
           if (prop === 'brands' && Array.isArray(target.brands)) {
             // Slightly shuffle brand order
             const brands = [...target.brands];
-            if (brands.length > 1 && prng() < 0.3) {
+            if (brands.length > 1 && personaRoll('brands') < 0.3) {
               // 30% chance to swap first two
               [brands[0], brands[1]] = [brands[1], brands[0]];
             }

@@ -43,11 +43,24 @@
           // object literal failed `instanceof BatteryManager` and dropped every
           // property this file did not enumerate by hand.
           const spoofedLevel = Math.max(0.5, Math.min(1.0, 0.75 + noise(0.1)));
+          // P1 2.6: chargingTime/dischargingTime used to be hard-coded to
+          // 0 / Infinity regardless of the real state, which contradicted the
+          // chargingchange and levelchange events this proxy still forwards
+          // from the real BatteryManager. Derive both from the real charging
+          // flag so the whole picture stays coherent.
+          const realCharging = battery.charging === true;
+          const realDischargingTime = battery.dischargingTime;
+          const spoofedChargingTime = realCharging ? 0 : Infinity;
+          const spoofedDischargingTime = realCharging
+            ? Infinity
+            : (typeof realDischargingTime === 'number' && isFinite(realDischargingTime) && realDischargingTime > 0
+              ? realDischargingTime
+              : Infinity);
           const spoofedBattery = new Proxy(battery, {
             get (target, prop, receiver) {
               if (prop === 'level') return spoofedLevel;
-              if (prop === 'chargingTime') return 0;
-              if (prop === 'dischargingTime') return Infinity;
+              if (prop === 'chargingTime') return spoofedChargingTime;
+              if (prop === 'dischargingTime') return spoofedDischargingTime;
               const value = Reflect.get(target, prop, receiver);
               // Bind methods to the real object so `this` is never the Proxy,
               // which would raise Illegal invocation on native accessors.
@@ -105,24 +118,15 @@
       }
     });
 
-    // Performance.now() - add bounded jitter to prevent high-resolution timing.
-    // The offset must NOT accumulate: a running total drifts away from the real
-    // clock without limit and eventually breaks any page that measures elapsed
-    // time. Jitter each reading around the true value instead.
-    safeWrap(() => {
-      const origNow = performance.now;
-      if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origNow)) {
-        globalThis.ssStealth.markPatched(origNow);
-
-        performance.now = function () {
-          const realTime = origNow.call(this);
-          // Sub-millisecond, zero-mean jitter that cannot accumulate.
-          return realTime + (prng() - 0.5) * 0.1;
-        };
-
-        log('[shapeshift][sensors] performance.now hooked');
-      }
-    });
+    // P1 2.4: performance.now() jittering was removed entirely. It ran in the
+    // ISOLATED world, where the page never observes it - so it protected
+    // nothing. Porting it to the MAIN world would be worse than useless: a
+    // +/-0.05 ms zero-mean offset is far below the resolution a timing attack
+    // needs to defeat (and a detector can average it away over a few hundred
+    // samples), while it actively corrupts performance.now() deltas for
+    // legitimate pages - animation frames, benchmark harnesses, RUM beacons.
+    // Date.now() is deliberately not hooked either: it is coarsened by the
+    // browser and patching it breaks every clock on the page.
 
     // Connection API protection (network information)
     safeWrap(() => {
@@ -200,9 +204,12 @@
 
           const gamepads = origGetGamepads.call(this);
 
-          // Return empty array or null to prevent fingerprinting
+          // P1 2.5: returning a hard-coded [null, null, null, null] is both a
+          // spoofing tell and a compatibility bug - `for (const gp of
+          // navigator.getGamepads())` then dereferences null. An empty array
+          // keeps the iteration contract and still hides real devices.
           if (config.sensors?.hideGamepads !== false) {
-            return [null, null, null, null];
+            return [];
           }
 
           return gamepads;
@@ -221,13 +228,10 @@
         const realPlugins = navigator.plugins;
         const realMimeTypes = navigator.mimeTypes;
 
-        const defineEmptyArrayLike = (target, value) => {
-          Object.defineProperty(target, value, {
-            get: () => value === 'plugins' ? realPlugins : realMimeTypes,
-            enumerable: true,
-            configurable: true
-          });
-        };
+        // P1 2.11: defineEmptyArrayLike() was dead code - it defined a getter
+        // on `navigator` that the Object.defineProperty call a few lines below
+        // immediately overwrote. Removed so the intent of this block is not
+        // ambiguous.
 
         // Chrome's PluginArray is not constructible, so shadow the two
         // properties with the genuine objects but suppress their contents by
@@ -254,7 +258,6 @@
           has () { return false; }
         });
 
-        defineEmptyArrayLike(navigator, 'plugins');
         Object.defineProperty(navigator, 'plugins', {
           get: () => emptyPlugins,
           enumerable: true,

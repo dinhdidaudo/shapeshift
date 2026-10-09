@@ -137,6 +137,47 @@ if (inlined) {
   assert('inlined PRNG matches core/prng.js', same);
 }
 
+section('MAIN-world config sanitation');
+// P1 2.14: sanitizeConfig() used to copy every boolean/number key out of a
+// config group, so a forged `screen: { evil: 1e9 }` reached the hooks. These
+// pins execute the real function extracted from the injector source, so the
+// group whitelist cannot silently regress to a blind copy.
+const sanitizeBlock = injectorSrc.match(/const CONFIG_BOUNDS[\s\S]*?function sanitizeConfig[\s\S]*?\n  \}/);
+assert('injector sanitizeConfig is extractable', !!sanitizeBlock);
+if (sanitizeBlock) {
+  const sanitizeConfig = new Function(sanitizeBlock[0] + '\nreturn sanitizeConfig;')();
+  const junk = sanitizeConfig({ screen: { evil: 1e9, useRealDistribution: false } });
+  assert('unknown group keys are dropped', junk.screen && junk.screen.evil === undefined, JSON.stringify(junk.screen));
+  assert('whitelisted group booleans survive', junk.screen.useRealDistribution === false);
+  const clamped = sanitizeConfig({ geolocation: { noiseLevel: 1e9 } });
+  assert('group numbers are clamped', clamped.geolocation.noiseLevel === 1, JSON.stringify(clamped.geolocation));
+  assert('non-object input yields null', sanitizeConfig(null) === null && sanitizeConfig('x') === null);
+  const scalar = sanitizeConfig({ rotationIntervalHours: 1e9, canvasNoiseStrength: -5 });
+  assert('top-level bounds still clamp', scalar.rotationIntervalHours === 8760 && scalar.canvasNoiseStrength === 0, JSON.stringify(scalar));
+}
+
+section('hook determinism wiring');
+// P1 2.1/2.2/2.3: a value the page can read twice must not change between the
+// two reads. These pins exist because the WebGL vendor suffix, the media
+// capability answers and the RTCRtp* codec order were each drawn from a
+// streaming PRNG per call, which is a one-line detector for the shim.
+const webglSrc = readFileSync(join(ROOT, 'content/hooks_webgl.js'), 'utf8');
+const mediaSrc = readFileSync(join(ROOT, 'content/hooks_media.js'), 'utf8');
+const fontsSrc = readFileSync(join(ROOT, 'content/hooks_fonts.js'), 'utf8');
+const sensorsSrc = readFileSync(join(ROOT, 'content/hooks_sensors.js'), 'utf8');
+// hooks_sensors.js deliberately quotes the removed patterns in its own comments
+// ("returning a hard-coded [null, null, null, null] ...", "defineEmptyArrayLike()
+// was dead code"), so the negative pins must read executable code only.
+const sensorsCode = sensorsSrc.split(String.fromCharCode(10)).filter((l) => !l.trim().startsWith('//')).join(String.fromCharCode(10));
+assert('ISOLATED webgl suffixes from a stable hash', webglSrc.includes('stableSuffix('));
+assert('MAIN-world webgl suffixes from a stable hash', injectorSrc.includes("hashString(seed + ':webgl:'"));
+assert('media capabilities use stableRoll', mediaSrc.includes('function stableRoll') && mediaSrc.includes("stableRoll('canplay'") && mediaSrc.includes("stableRoll('rtp-sender'"));
+assert('media hooks never draw from the streaming PRNG', !/prng\(\)/.test(mediaSrc));
+assert('font check only upgrades absence, never hides a real font', fontsSrc.includes('if (result === false && globalThis.ssHashString)'));
+assert('gamepads are hidden with an iterable, not a null-filled array', sensorsCode.includes('return [];') && !sensorsCode.includes('[null, null, null, null]'));
+assert('battery times follow the real charging flag', sensorsSrc.includes('realCharging ? 0 : Infinity') && sensorsSrc.includes('realDischargingTime'));
+assert('dead plugin helper stayed deleted', !sensorsCode.includes('defineEmptyArrayLike'));
+
 console.log('');
 console.log((failures === 0 ? 'PASS' : 'FAIL') + ' - ' + (checks - failures) + '/' + checks + ' tests passed');
 process.exit(failures === 0 ? 0 : 1);

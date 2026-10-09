@@ -21,6 +21,17 @@
       }
     }
 
+    // P1 2.2/2.3: SDP fingerprint bytes, ICE credential suffixes and device
+    // labels used to be drawn from the streaming PRNG inside each call, so two
+    // setLocalDescription/enumerateDevices calls disagreed and the same SDP in
+    // produced a different SDP out. Key them on (seed, input) instead, exactly
+    // like the media and WebGL surfaces already do.
+    const webrtcHash = globalThis.ssHashString;
+    function stableRoll (label, input) {
+      if (!webrtcHash) return 0.5;
+      return webrtcHash(((env.seed >>> 0) || 0) + ':webrtc:' + label + ':' + input) / 4294967296;
+    }
+
     safeWrap(() => {
       if (!window.RTCPeerConnection) return;
 
@@ -118,9 +129,9 @@
                   (match, algorithm, fingerprint) => {
                     // Generate deterministic but different fingerprint
                     const parts = fingerprint.split(':');
-                    const modified = parts.map((part, idx) => {
+                    const modified = parts.map((part) => {
                       const num = parseInt(part, 16);
-                      const offset = Math.floor(prng() * 16) % 256;
+                      const offset = Math.floor(stableRoll('fp', part) * 16) % 256;
                       const newNum = (num + offset) % 256;
                       return newNum.toString(16).toUpperCase().padStart(2, '0');
                     });
@@ -134,7 +145,7 @@
                 modifiedSdp = modifiedSdp.replace(
                   /^a=ice-ufrag:(.+)$/gm,
                   (match, ufrag) => {
-                    const suffix = Math.floor(prng() * 0xFFFF).toString(16);
+                    const suffix = Math.floor(stableRoll('ufrag', ufrag) * 0xFFFF).toString(16);
                     const newUfrag = ufrag + suffix;
                     log(`[shapeshift][webrtc] Modified ice-ufrag`);
                     return `a=ice-ufrag:${newUfrag}`;
@@ -144,7 +155,7 @@
                 modifiedSdp = modifiedSdp.replace(
                   /^a=ice-pwd:(.+)$/gm,
                   (match, pwd) => {
-                    const suffix = Math.floor(prng() * 0xFFFF).toString(16);
+                    const suffix = Math.floor(stableRoll('pwd', pwd) * 0xFFFF).toString(16);
                     const newPwd = pwd + suffix;
                     log(`[shapeshift][webrtc] Modified ice-pwd`);
                     return `a=ice-pwd:${newPwd}`;
@@ -152,11 +163,16 @@
                 );
               }
 
-              // Create modified description
-              const modifiedDesc = {
-                type: description.type,
-                sdp: modifiedSdp
-              };
+              // P1 2.13: hand back a real RTCSessionDescription. A plain
+              // {type, sdp} object breaks libraries (adapter.js,
+              // mediasoup-client) that check instanceof or call methods on the
+              // description before passing it on.
+              let modifiedDesc;
+              try {
+                modifiedDesc = new RTCSessionDescription({ type: description.type, sdp: modifiedSdp });
+              } catch (e) {
+                modifiedDesc = { type: description.type, sdp: modifiedSdp };
+              }
 
               return origSetLocalDescription.call(this, modifiedDesc);
             }
@@ -291,7 +307,7 @@
                 };
 
                 const labels = genericLabels[device.kind] || ['Device'];
-                const labelIndex = Math.floor(prng() * labels.length);
+                const labelIndex = Math.floor(stableRoll('label', device.deviceId || device.kind) * labels.length);
                 modified.label = labels[labelIndex];
                 log(`[shapeshift][media] Spoofed label: ${device.label} → ${modified.label}`);
               }

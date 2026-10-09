@@ -162,6 +162,31 @@ async function loadStats () {
   if ($('rotationCount')) $('rotationCount').textContent = formatNumber(rotation.rotationCount || 0);
 }
 
+// Feature 5.7: the countdown used to be painted once, the moment the popup
+// opened, so it froze for as long as the popup stayed open. renderRotation()
+// is now split out of loadRotation() and re-run on a timer, so the label and
+// the progress bar actually tick.
+let rotationStatus = null;
+let rotationTimer = null;
+
+function renderRotation () {
+  const section = $('rotationSection');
+  if (!section || !rotationStatus) return;
+  const status = rotationStatus;
+  if ($('rotationStatus')) $('rotationStatus').textContent = 'Every ' + status.intervalHours + 'h';
+  let label = '-';
+  let pct = 0;
+  if (status.nextRotation) {
+    const diff = new Date(status.nextRotation).getTime() - Date.now();
+    const mins = Math.max(0, Math.round(diff / 60000));
+    label = mins < 60 ? mins + ' min' : Math.round(mins / 60) + ' h';
+    const intervalMs = (status.intervalHours || 24) * 3600000;
+    pct = Math.min(100, Math.max(0, 100 - (diff / intervalMs) * 100));
+  }
+  if ($('nextRotation')) $('nextRotation').textContent = label;
+  if ($('rotationProgress')) $('rotationProgress').style.width = pct.toFixed(1) + '%';
+}
+
 async function loadRotation () {
   const section = $('rotationSection');
   if (!section) return;
@@ -171,20 +196,16 @@ async function loadRotation () {
       section.hidden = true;
       return;
     }
-    const status = response.status;
+    rotationStatus = response.status;
     section.hidden = false;
-    if ($('rotationStatus')) $('rotationStatus').textContent = 'Every ' + status.intervalHours + 'h';
-    let label = '-';
-    let pct = 0;
-    if (status.nextRotation) {
-      const diff = new Date(status.nextRotation).getTime() - Date.now();
-      const mins = Math.max(0, Math.round(diff / 60000));
-      label = mins < 60 ? mins + ' min' : Math.round(mins / 60) + ' h';
-      const intervalMs = (status.intervalHours || 24) * 3600000;
-      pct = Math.min(100, Math.max(0, 100 - (diff / intervalMs) * 100));
+    renderRotation();
+    if (rotationTimer === null) {
+      rotationTimer = setInterval(renderRotation, 30000);
+      // The popup is a short-lived document; never leave a timer behind.
+      window.addEventListener('unload', function () {
+        if (rotationTimer !== null) clearInterval(rotationTimer);
+      });
     }
-    if ($('nextRotation')) $('nextRotation').textContent = label;
-    if ($('rotationProgress')) $('rotationProgress').style.width = pct.toFixed(1) + '%';
   } catch (e) {
     section.hidden = true;
   }
@@ -234,9 +255,19 @@ async function main () {
   if (reset) {
     reset.addEventListener('click', async function () {
       reset.disabled = true;
-      await storageRemove('ss_salt');
-      const rotation = (await storageGet(['ss_rotation_info'])).ss_rotation_info || {};
-      await storageSet({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
+      // Route the popup reset through the service worker's rotateFingerprintNow()
+      // so the popup, Options and the scheduled alarm all produce the SAME
+      // rotation (notification, rotation info, alarm re-arm).
+      let rotated = false;
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'ROTATE_NOW' });
+        rotated = !!(res && res.success);
+      } catch (e) { /* fall through to the local path */ }
+      if (!rotated) {
+        await storageRemove('ss_salt');
+        const rotation = (await storageGet(['ss_rotation_info'])).ss_rotation_info || {};
+        await storageSet({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
+      }
       toast('New identity generated - reloading tabs');
       try {
         const tabs = await chrome.tabs.query({});

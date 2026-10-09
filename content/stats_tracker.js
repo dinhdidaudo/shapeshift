@@ -22,7 +22,10 @@
   };
 
   let flushTimeout = null;
-  const FLUSH_INTERVAL = 2000; // Send updates every 2 seconds
+  // P2: 2 s per tab meant 20 open tabs sent 10 messages/s, each waking the
+  // service worker for a storage read-modify-write. 15 s keeps the counters
+  // useful while cutting the wakeups by ~7x; beforeunload still flushes.
+  const FLUSH_INTERVAL = 15000;
 
   // Increment a statistic counter
   function increment(category) {
@@ -64,13 +67,13 @@
       }).catch(error => {
         // Extension context might be invalid, ignore
         if (globalThis.ssConfig?.debug) {
-          console.warn('[FP Stats] Failed to send stats:', error);
+          console.warn('[shapeshift][stats] Failed to send stats:', error);
         }
       });
     } catch (error) {
       // Ignore errors (extension might be reloading)
       if (globalThis.ssConfig?.debug) {
-        console.warn('[FP Stats] Failed to send stats:', error);
+        console.warn('[shapeshift][stats] Failed to send stats:', error);
       }
     }
   }

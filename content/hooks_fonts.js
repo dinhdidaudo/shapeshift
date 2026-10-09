@@ -47,14 +47,21 @@
           // and define the fields as own properties instead.
           const noiseFactor = 0.01; // 1% variation
 
+          // P1 2.8: TextMetrics exposes different fields per engine, so some
+          // of these may be undefined; `undefined + noise(...)` produced NaN
+          // and a NaN width breaks layout. Only perturb real, finite numbers.
+          const nn = (value, scale) => (
+            typeof value === 'number' && isFinite(value) ? value + noise(scale) : value
+          );
+
           const noisedValues = {
-            width: metrics.width + noise(metrics.width * noiseFactor),
-            actualBoundingBoxLeft: metrics.actualBoundingBoxLeft + noise(noiseFactor),
-            actualBoundingBoxRight: metrics.actualBoundingBoxRight + noise(noiseFactor),
-            actualBoundingBoxAscent: metrics.actualBoundingBoxAscent + noise(noiseFactor),
-            actualBoundingBoxDescent: metrics.actualBoundingBoxDescent + noise(noiseFactor),
-            fontBoundingBoxAscent: metrics.fontBoundingBoxAscent + noise(noiseFactor),
-            fontBoundingBoxDescent: metrics.fontBoundingBoxDescent + noise(noiseFactor),
+            width: nn(metrics.width, metrics.width * noiseFactor),
+            actualBoundingBoxLeft: nn(metrics.actualBoundingBoxLeft, noiseFactor),
+            actualBoundingBoxRight: nn(metrics.actualBoundingBoxRight, noiseFactor),
+            actualBoundingBoxAscent: nn(metrics.actualBoundingBoxAscent, noiseFactor),
+            actualBoundingBoxDescent: nn(metrics.actualBoundingBoxDescent, noiseFactor),
+            fontBoundingBoxAscent: nn(metrics.fontBoundingBoxAscent, noiseFactor),
+            fontBoundingBoxDescent: nn(metrics.fontBoundingBoxDescent, noiseFactor),
             alphabeticBaseline: metrics.alphabeticBaseline,
             hangingBaseline: metrics.hangingBaseline,
             ideographicBaseline: metrics.ideographicBaseline,
@@ -109,11 +116,16 @@
           // on every read, which is itself a strong fingerprinting signal.
           const result = origCheck.call(this, font, text);
 
-          if (globalThis.ssHashString) {
+          // P1 2.7: only ever upgrade "absent" to "present" for a small
+          // deterministic slice of inputs, never the reverse. Hiding a font
+          // that really exists makes the page fall back and renders visibly
+          // wrong; claiming a missing font exists merely keeps layout on the
+          // fallback. Keyed on (font, text) so repeat calls agree.
+          if (result === false && globalThis.ssHashString) {
             const flip = (globalThis.ssHashString(String(font) + String(text || '')) % 10) === 0;
             if (flip) {
-              log('[shapeshift][fonts] check() result flipped for:', font);
-              return !result;
+              log('[shapeshift][fonts] check() reported present for:', font);
+              return true;
             }
           }
 

@@ -54,7 +54,13 @@
     };
   }
 
+  // P0 1.3: injecting <script src="chrome-extension://..."> into the page DOM is
+  // observable by any page script (MutationObserver, resource timing entries,
+  // message listeners) and it used to happen on EVERY load. The helper is only
+  // needed for the diagnostic WebGL sample, so it is now gated on the debug
+  // flag and skipped entirely in normal browsing.
   function ensurePageHelper () {
+    if (!debug) return Promise.resolve();
     if (pageHelperReady) return Promise.resolve();
     return new Promise(resolve => {
       const script = document.createElement("script");
@@ -66,6 +72,7 @@
   }
 
   async function sampleWebGLFromPage () {
+    if (!debug) return "webgl-disabled";
     await ensurePageHelper();
     return new Promise(resolve => {
       const reqId = "ss-test-" + (++ssTestSeq);

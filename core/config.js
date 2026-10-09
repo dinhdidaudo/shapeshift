@@ -92,4 +92,44 @@
       return defaultConfig;
     }
   };
+
+  // P2: changing a setting in Options used to leave every already-open tab on
+  // the stale config until a manual reload, because only the salt had a
+  // storage.onChanged listener. Rebuild the live config whenever ssConfig
+  // changes so the next read on an open page sees the new values.
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.ssConfig) return;
+      globalThis.ssLoadConfig().catch(() => {});
+      // Feature 5.2: mirror the new config into chrome.storage.sync so another
+      // signed-in browser picks the same settings up. Only the config travels;
+      // ss_salt never leaves chrome.storage.local, so syncing a profile cannot
+      // clone this machine's identity. Best-effort: sync may be unavailable or
+      // disabled, and that must never break the local load path.
+      try {
+        if (chrome.storage.sync && changes.ssConfig.newValue) {
+          chrome.storage.sync.set({ ssConfig: changes.ssConfig.newValue }, function () {
+            if (chrome.runtime && chrome.runtime.lastError) { /* sync unavailable */ }
+          });
+        }
+      } catch (e) { /* sync unavailable */ }
+    });
+  }
+
+  // Feature 5.2: a fresh machine that signs into the same profile has no local
+  // ssConfig yet but may have one in sync. Adopt it once, and only when local
+  // is absent, so an offline edit on this machine is never overwritten.
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
+    try {
+      chrome.storage.sync.get(['ssConfig'], function (synced) {
+        if (!synced || !synced.ssConfig) return;
+        chrome.storage.local.get(['ssConfig'], function (local) {
+          if (local && local.ssConfig) return;
+          chrome.storage.local.set({ ssConfig: synced.ssConfig }, function () {
+            if (chrome.runtime && chrome.runtime.lastError) { /* ignore */ }
+          });
+        });
+      });
+    } catch (e) { /* sync unavailable */ }
+  }
 })();

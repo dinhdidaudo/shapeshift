@@ -88,6 +88,21 @@
     'enableMediaProtection', 'enableGeolocationProtection', 'enableDetectionResistance',
     'useStrongKDF', 'useGaussianNoise', 'autoRotateFingerprint', 'rotateOnStartup'
   ];
+  // P1 2.14: the group loop used to copy every boolean/number key it found, so
+  // a forged `screen: { foo: 1e9 }` (or `geolocation: { noiseLevel: 1e9 }`)
+  // reached the hooks unclamped. Groups are now whitelisted per key exactly
+  // like the top-level scalars: booleans by name, numbers by name + bounds.
+  const CONFIG_GROUP_BOOLEAN_KEYS = {
+    navigator: ['fuzzHardwareConcurrency', 'fuzzDeviceMemory', 'shuffleLanguages'],
+    webrtc: ['blockIPLeak', 'randomizeSDP', 'forceRelay'],
+    mediaDevices: ['randomizeDeviceIds', 'spoofDeviceLabels'],
+    screen: ['useRealDistribution'],
+    sensors: ['hideGamepads'],
+    geolocation: []
+  };
+  const CONFIG_GROUP_BOUNDS = {
+    geolocation: { noiseLevel: [0, 1] }
+  };
   const CONFIG_GROUP_KEYS = [
     'navigator', 'webrtc', 'mediaDevices', 'screen', 'sensors', 'geolocation'
   ];
@@ -110,9 +125,17 @@
       const value = raw[group];
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
       const copy = {};
-      for (const gk in value) {
+      const boolKeys = CONFIG_GROUP_BOOLEAN_KEYS[group] || [];
+      for (let j = 0; j < boolKeys.length; j++) {
+        const gk = boolKeys[j];
+        if (typeof value[gk] === 'boolean') copy[gk] = value[gk];
+      }
+      const groupBounds = CONFIG_GROUP_BOUNDS[group] || {};
+      for (const gk in groupBounds) {
         const gv = value[gk];
-        if (typeof gv === 'boolean' || (typeof gv === 'number' && isFinite(gv))) copy[gk] = gv;
+        if (typeof gv !== 'number' || !isFinite(gv)) continue;
+        const bounds = groupBounds[gk];
+        copy[gk] = Math.min(bounds[1], Math.max(bounds[0], gv));
       }
       out[group] = copy;
     }
@@ -270,7 +293,10 @@
           let snapshot = null;
           let ctx = null;
           try {
-            ctx = this.getContext('2d', { willReadFrequently: true });
+            // Plain getContext: willReadFrequently silently switches an
+            // existing canvas to software rendering and warns when a 2d
+            // context already exists with other attributes.
+            ctx = this.getContext('2d');
             if (ctx && origGetImageData) {
               snapshot = noisedCopyOf(ctx, this.width, this.height);
               ctx.putImageData(snapshot.noised, 0, 0);
@@ -296,7 +322,7 @@
             canvas.__ssSnapshot = null;
           };
           try {
-            const ctx = this.getContext('2d', { willReadFrequently: true });
+            const ctx = this.getContext('2d');
             if (ctx && origGetImageData) {
               const snapshot = noisedCopyOf(ctx, this.width, this.height);
               this.__ssCtx = ctx;
@@ -356,10 +382,30 @@
 
         const realWidth = window.screen.width;
         const realHeight = window.screen.height;
+        const realPixelRatio = window.devicePixelRatio || 1;
         const spoofed = sampleResolution();
-        const spoofedPixelRatio = spoofed.width >= 2560 ? 2 : 1;
+
+        // P1 2.10: the MAIN world is the only copy the page can read, so it must
+        // not contradict itself. Scale the REAL devicePixelRatio by how far the
+        // spoofed width moved, so screen.width / dpr still implies a CSS screen
+        // size close to the real one instead of snapping to 1 or 2 and clashing
+        // with window.innerWidth.
+        const widthScale = realWidth > 0 ? spoofed.width / realWidth : 1;
+        const spoofedPixelRatio = Math.min(4, Math.max(1, Math.round(realPixelRatio * widthScale * 100) / 100));
+
         const colorDepths = [24, 24, 24, 30, 32];
         const spoofedColorDepth = colorDepths[Math.floor(prng() * colorDepths.length)];
+
+        // P1 2.10: availHeight is not height - 40 everywhere (macOS has no
+        // taskbar; Windows taskbars are not 40 px). Measure the real gap between
+        // the screen and its work area and scale that gap to the spoofed height.
+        const realAvailHeight = Number(window.screen.availHeight);
+        const realGap = Number.isFinite(realAvailHeight) && realAvailHeight > 0 && realAvailHeight <= realHeight
+          ? realHeight - realAvailHeight
+          : 0;
+        const availOffset = realGap > 0
+          ? Math.max(1, Math.round(realGap * (spoofed.height / (realHeight || spoofed.height))))
+          : 0;
 
         log(`[shapeshift][page][screen] Real: ${realWidth}x${realHeight}, Spoofed: ${spoofed.width}x${spoofed.height}`);
 
@@ -378,7 +424,7 @@
         defineGetter(window.screen, 'width', () => spoofed.width);
         defineGetter(window.screen, 'height', () => spoofed.height);
         defineGetter(window.screen, 'availWidth', () => spoofed.width);
-        defineGetter(window.screen, 'availHeight', () => spoofed.height - 40);
+        defineGetter(window.screen, 'availHeight', () => spoofed.height - availOffset);
         defineGetter(window.screen, 'colorDepth', () => spoofedColorDepth);
         defineGetter(window.screen, 'pixelDepth', () => spoofedColorDepth);
         defineGetter(window, 'devicePixelRatio', () => spoofedPixelRatio);
@@ -433,6 +479,7 @@
       try {
         // Get real timezone offset (don't change this - keeps times correct)
         const realOffset = new Date().getTimezoneOffset();
+        const OrigIntlDateTimeFormat = Intl.DateTimeFormat;
 
         // Map of UTC offsets to IANA timezone identifiers
         // Grouped by offset so we can pick a different zone with same offset
@@ -476,18 +523,54 @@
           '-780': ['Pacific/Tongatapu', 'Pacific/Apia']
         };
 
-        // Find timezones with the same offset as real timezone
+        // P0 1.5: a spoofed zone name only stays internally consistent when
+        // its offset matches the real one on EVERY date the page might probe,
+        // not just today. Two zones can share a winter offset yet differ in
+        // DST rules (America/Phoenix vs America/Denver), in which case
+        // resolvedOptions().timeZone would contradict getTimezoneOffset() and
+        // formatter.format() for half the year. Filter candidates by comparing
+        // their offset today AND ~6 months out, so the pair straddles both DST
+        // phases regardless of hemisphere.
+        function zoneOffsetMinutes(zone, date) {
+          try {
+            const dtf = new OrigIntlDateTimeFormat('en-US', {
+              timeZone: zone, hour12: false,
+              year: 'numeric', month: '2-digit', day: '2-digit',
+              hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+            const parts = dtf.formatToParts(date);
+            const m = {};
+            for (let i = 0; i < parts.length; i++) {
+              if (parts[i].type !== 'literal') m[parts[i].type] = parts[i].value;
+            }
+            const asUTC = Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second);
+            return Math.round((asUTC - date.getTime()) / 60000);
+          } catch (e) {
+            return null;
+          }
+        }
+
         const offsetKey = String(realOffset);
-        const availableZones = timezonesByOffset[offsetKey] || [];
+        const candidates = timezonesByOffset[offsetKey] || [];
+
+        const realZone = OrigIntlDateTimeFormat().resolvedOptions().timeZone;
+        const sampleA = new Date();
+        const sampleB = new Date(Date.now() + 182 * 24 * 60 * 60 * 1000);
+        const realA = zoneOffsetMinutes(realZone, sampleA);
+        const realB = zoneOffsetMinutes(realZone, sampleB);
+
+        const availableZones = candidates.filter(function (z) {
+          return zoneOffsetMinutes(z, sampleA) === realA &&
+                 zoneOffsetMinutes(z, sampleB) === realB;
+        });
 
         if (availableZones.length > 0) {
-          // Pick a random timezone from the same offset group
+          // Pick a random timezone from the DST-consistent group
           const spoofedZone = availableZones[Math.floor(prng() * availableZones.length)];
 
           // Hook Intl.DateTimeFormat to return spoofed timezone
-          const OrigDateTimeFormat = Intl.DateTimeFormat;
           Intl.DateTimeFormat = function(...args) {
-            const instance = new OrigDateTimeFormat(...args);
+            const instance = new OrigIntlDateTimeFormat(...args);
             const origResolvedOptions = instance.resolvedOptions;
 
             instance.resolvedOptions = function() {
@@ -500,12 +583,12 @@
           };
 
           // Copy static properties
-          Object.setPrototypeOf(Intl.DateTimeFormat, OrigDateTimeFormat);
-          Object.setPrototypeOf(Intl.DateTimeFormat.prototype, OrigDateTimeFormat.prototype);
+          Object.setPrototypeOf(Intl.DateTimeFormat, OrigIntlDateTimeFormat);
+          Object.setPrototypeOf(Intl.DateTimeFormat.prototype, OrigIntlDateTimeFormat.prototype);
 
           log('[shapeshift][page][timezone] Real offset:', realOffset, 'Spoofed zone:', spoofedZone);
         } else {
-          log('[shapeshift][page][timezone] No alternative timezones for offset:', realOffset);
+          log('[shapeshift][page][timezone] No DST-consistent zones for offset:', realOffset);
         }
       } catch (e) {
         log('[shapeshift][page][timezone] Failed:', e);
@@ -540,8 +623,11 @@
               gl.UNMASKED_RENDERER_WEBGL
             ].filter(Boolean);
 
+            // P1 2.1: key the suffix on (seed, param, value) so repeated
+            // getParameter(VENDOR) reads return the same string. A streaming
+            // PRNG here made two reads disagree, which is trivially detectable.
             if (maskVendors && vendorParams.includes(p) && typeof value === 'string') {
-              const suffix = (Math.floor(prng() * 0xFFFF) || 1) >>> 0;
+              const suffix = (hashString(seed + ':webgl:' + p + ':' + value) % 0xFFFF) || 1;
               return value + ' (ss-' + suffix + ')';
             }
 
@@ -602,6 +688,561 @@
         }
       } catch (e) {
         log('[shapeshift][page][audio] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // FONT HOOKS (MAIN world)
+    // ========================================================================
+    if (config.enableFontProtection) {
+      try {
+        const fontSeed = seed >>> 0;
+        const fontNoise = (key, scale) => {
+          const h = hashString(fontSeed + ':font:' + key);
+          return ((h / 4294967296) - 0.5) * scale;
+        };
+
+        const CanvasProto = CanvasRenderingContext2D.prototype;
+        if (CanvasProto.measureText) {
+          const origMeasureText = CanvasProto.measureText;
+          CanvasProto.measureText = function (text) {
+            const metrics = origMeasureText.call(this, text);
+            // P1 2.8: only perturb finite numbers - undefined + noise made NaN.
+            const nn = (value, scale, key) => (
+              typeof value === 'number' && isFinite(value)
+                ? value + fontNoise(key + ':' + text, scale)
+                : value
+            );
+            const noised = {
+              width: nn(metrics.width, metrics.width * 0.01, 'w'),
+              actualBoundingBoxLeft: nn(metrics.actualBoundingBoxLeft, 0.01, 'abl'),
+              actualBoundingBoxRight: nn(metrics.actualBoundingBoxRight, 0.01, 'abr'),
+              actualBoundingBoxAscent: nn(metrics.actualBoundingBoxAscent, 0.01, 'aba'),
+              actualBoundingBoxDescent: nn(metrics.actualBoundingBoxDescent, 0.01, 'abd'),
+              fontBoundingBoxAscent: nn(metrics.fontBoundingBoxAscent, 0.01, 'fba'),
+              fontBoundingBoxDescent: nn(metrics.fontBoundingBoxDescent, 0.01, 'fbd'),
+              alphabeticBaseline: metrics.alphabeticBaseline,
+              hangingBaseline: metrics.hangingBaseline,
+              ideographicBaseline: metrics.ideographicBaseline,
+              emHeightAscent: metrics.emHeightAscent,
+              emHeightDescent: metrics.emHeightDescent
+            };
+
+            let out;
+            try {
+              out = Object.create(TextMetrics.prototype);
+            } catch (e) {
+              out = {};
+            }
+            for (const key in noised) {
+              try {
+                Object.defineProperty(out, key, {
+                  value: noised[key], enumerable: true, configurable: true, writable: false
+                });
+              } catch (e) {
+                out[key] = noised[key];
+              }
+            }
+            return out;
+          };
+        }
+
+        if (document.fonts && document.fonts.check) {
+          const origCheck = document.fonts.check;
+          document.fonts.check = function (font, text) {
+            const result = origCheck.call(this, font, text);
+            // P1 2.7: only upgrade absent -> present, deterministically.
+            if (result === false) {
+              const flip = (hashString(fontSeed + ':fontcheck:' + String(font) + String(text || '')) % 10) === 0;
+              if (flip) return true;
+            }
+            return result;
+          };
+        }
+
+        log('[shapeshift][page][fonts] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][fonts] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // WEBRTC HOOKS (MAIN world) - IP leak prevention, the highest-value surface
+    // ========================================================================
+    if (config.enableWebRTCProtection) {
+      try {
+        const blockIPLeak = !config.webrtc || config.webrtc.blockIPLeak !== false;
+        const randomizeSDP = !config.webrtc || config.webrtc.randomizeSDP !== false;
+        const webrtcSeed = seed >>> 0;
+
+        if (window.RTCPeerConnection) {
+          const OrigRTCPeerConnection = window.RTCPeerConnection;
+
+          function scrubSdp(sdp) {
+            let out = sdp;
+            if (blockIPLeak) {
+              const kept = [];
+              const lines = out.split('\n');
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (/^a=candidate:/.test(line) &&
+                    (/ typ host( |$)/.test(line) || / typ srflx( |$)/.test(line))) continue;
+                kept.push(line);
+              }
+              out = kept.join('\n');
+            }
+            if (randomizeSDP) {
+              out = out.replace(/^a=fingerprint:(\w+)\s+([0-9A-F:]+)$/gm, function (m, alg, fp) {
+                const parts = fp.split(':');
+                const mod = parts.map(function (part, idx) {
+                  const num = parseInt(part, 16);
+                  const off = hashString(webrtcSeed + ':fp:' + idx + ':' + part) % 256;
+                  return ((num + off) % 256).toString(16).toUpperCase().padStart(2, '0');
+                });
+                return 'a=fingerprint:' + alg + ' ' + mod.join(':');
+              });
+              out = out.replace(/^a=ice-ufrag:(.+)$/gm, function (m, u) {
+                return 'a=ice-ufrag:' + u + (hashString(webrtcSeed + ':ufrag:' + u) % 0xFFFF).toString(16);
+              });
+              out = out.replace(/^a=ice-pwd:(.+)$/gm, function (m, p) {
+                return 'a=ice-pwd:' + p + (hashString(webrtcSeed + ':pwd:' + p) % 0xFFFF).toString(16);
+              });
+            }
+            return out;
+          }
+
+          window.RTCPeerConnection = function (configuration, constraints) {
+            const pc = new OrigRTCPeerConnection(configuration, constraints);
+            const origSetLocal = pc.setLocalDescription;
+            pc.setLocalDescription = function (description) {
+              if (description && description.sdp) {
+                const modifiedSdp = scrubSdp(description.sdp);
+                let desc;
+                try {
+                  desc = new RTCSessionDescription({ type: description.type, sdp: modifiedSdp });
+                } catch (e) {
+                  desc = { type: description.type, sdp: modifiedSdp };
+                }
+                return origSetLocal.call(this, desc);
+              }
+              return origSetLocal.apply(this, arguments);
+            };
+            if (blockIPLeak) {
+              const origAddIce = pc.addIceCandidate;
+              pc.addIceCandidate = function (candidate) {
+                const text = candidate && candidate.candidate;
+                if (typeof text === 'string' &&
+                    (text.indexOf('typ host') !== -1 || text.indexOf('typ srflx') !== -1)) {
+                  return Promise.resolve();
+                }
+                return origAddIce.apply(this, arguments);
+              };
+            }
+            return pc;
+          };
+          Object.setPrototypeOf(window.RTCPeerConnection, OrigRTCPeerConnection);
+          window.RTCPeerConnection.prototype = OrigRTCPeerConnection.prototype;
+        }
+
+        log('[shapeshift][page][webrtc] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][webrtc] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // SENSOR HOOKS (MAIN world) - P0 1.1: these used to run only in the
+    // ISOLATED world, so the page never saw them.
+    // ========================================================================
+    if (config.enableSensorProtection) {
+      try {
+        if (navigator.getBattery) {
+          const origGetBattery = navigator.getBattery;
+          navigator.getBattery = function () {
+            return origGetBattery.call(this).then(function (battery) {
+              const realCharging = battery.charging === true;
+              const realDischargingTime = battery.dischargingTime;
+              const spoofedLevel = Math.max(0.5, Math.min(1.0,
+                0.75 + ((hashString(seed + ':battery') / 4294967296) - 0.5) * 0.1));
+              return new Proxy(battery, {
+                get (target, prop, receiver) {
+                  if (prop === 'level') return spoofedLevel;
+                  if (prop === 'chargingTime') return realCharging ? 0 : Infinity;
+                  if (prop === 'dischargingTime') {
+                    return realCharging
+                      ? Infinity
+                      : (typeof realDischargingTime === 'number' &&
+                         isFinite(realDischargingTime) && realDischargingTime > 0
+                        ? realDischargingTime : Infinity);
+                  }
+                  const value = Reflect.get(target, prop, receiver);
+                  return typeof value === 'function' ? value.bind(target) : value;
+                }
+              });
+            });
+          };
+        }
+
+        if (performance.memory) {
+          const baseUsed = performance.memory.usedJSHeapSize || 10000000;
+          const baseLimit = performance.memory.jsHeapSizeLimit || 2172649472;
+          const jitter = (k, scale) =>
+            ((hashString(seed + ':' + k) / 4294967296) - 0.5) * scale;
+          const noisedMemory = {
+            get jsHeapSizeLimit () { return Math.floor(baseLimit + jitter('ml', baseLimit * 0.05)); },
+            get totalJSHeapSize () { return Math.floor(baseUsed * 1.5 + jitter('mt', baseUsed * 0.1)); },
+            get usedJSHeapSize () { return Math.floor(baseUsed + jitter('mu', baseUsed * 0.1)); }
+          };
+          Object.defineProperty(performance, 'memory', {
+            get: () => noisedMemory, enumerable: true, configurable: true
+          });
+        }
+
+        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (connection) {
+          const connectionTypes = ['4g', '4g', '4g', 'wifi', 'wifi'];
+          const spoofedType = connectionTypes[
+            hashString(seed + ':conn') % connectionTypes.length];
+          const spoofedDownlink = spoofedType === 'wifi' ? 10 : 5;
+          Object.defineProperty(connection, 'effectiveType', {
+            get: () => spoofedType, enumerable: true, configurable: true
+          });
+          Object.defineProperty(connection, 'downlink', {
+            get: () => spoofedDownlink, enumerable: true, configurable: true
+          });
+        }
+
+        if (navigator.getGamepads) {
+          navigator.getGamepads = function () { return []; };
+        }
+
+        // Plugin enumeration: shadow the real PluginArray/MimeTypeArray with an
+        // empty native-like view so item()/namedItem()/iteration still exist.
+        const realPlugins = navigator.plugins;
+        const realMimeTypes = navigator.mimeTypes;
+        const emptyView = (real) => new Proxy(real, {
+          get (t, prop) {
+            if (prop === 'length') return 0;
+            if (prop === 'item' || prop === 'namedItem') return () => null;
+            if (prop === Symbol.iterator) return function* () {};
+            const v = Reflect.get(t, prop, t);
+            return typeof v === 'function' ? v.bind(t) : v;
+          },
+          has () { return false; }
+        });
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => emptyView(realPlugins), enumerable: true, configurable: true
+        });
+        Object.defineProperty(navigator, 'mimeTypes', {
+          get: () => emptyView(realMimeTypes), enumerable: true, configurable: true
+        });
+
+        log('[shapeshift][page][sensors] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][sensors] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // TOUCH HOOKS (MAIN world)
+    // ========================================================================
+    if (config.enableTouchProtection) {
+      try {
+        const touchCaps = [0, 0, 0, 0, 1, 5, 10];
+        const spoofedTouch = touchCaps[hashString(seed + ':touch') % touchCaps.length];
+
+        Object.defineProperty(navigator, 'maxTouchPoints', {
+          get: () => spoofedTouch, enumerable: true, configurable: true
+        });
+
+        const shouldHaveTouch = spoofedTouch > 0;
+        if (shouldHaveTouch) {
+          if (!('ontouchstart' in window)) {
+            try { window.ontouchstart = null; } catch (e) { /* ignore */ }
+          }
+        } else if ('ontouchstart' in window) {
+          try {
+            delete window.ontouchstart;
+          } catch (e) {
+            try {
+              Object.defineProperty(window, 'ontouchstart', {
+                get: () => undefined, configurable: true
+              });
+            } catch (e2) { /* best effort */ }
+          }
+        }
+
+        const origMatchMedia = window.matchMedia;
+        window.matchMedia = function (query) {
+          const result = origMatchMedia.call(this, query);
+          const lower = String(query).toLowerCase();
+          if (lower.includes('pointer') || lower.includes('hover')) {
+            function spoofedMatches () {
+              if (lower.includes('pointer:') && lower.includes('coarse')) return shouldHaveTouch;
+              if (lower.includes('pointer:') && lower.includes('fine')) return !shouldHaveTouch;
+              if (lower.includes('hover:') && lower.includes('none')) return shouldHaveTouch;
+              if (lower.includes('hover:') && lower.includes('hover')) return !shouldHaveTouch;
+              return result.matches;
+            }
+            return new Proxy(result, {
+              get (target, prop) {
+                if (prop === 'matches') return spoofedMatches();
+                const v = target[prop];
+                return typeof v === 'function' ? v.bind(target) : v;
+              }
+            });
+          }
+          return result;
+        };
+
+        log('[shapeshift][page][touch] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][touch] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // USER AGENT HOOKS (MAIN world) - one persona shared by every surface so
+    // navigator.userAgent and userAgentData never disagree (P1 2.9).
+    // ========================================================================
+    if (config.enableUserAgentProtection) {
+      try {
+        const platforms = [
+          { platform: 'Win32', ua: 'Windows NT 10.0; Win64; x64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
+          { platform: 'MacIntel', ua: 'Macintosh; Intel Mac OS X 10_15_7', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
+          { platform: 'Linux x86_64', ua: 'X11; Linux x86_64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] }
+        ];
+        const persona = platforms[hashString(seed + ':ua') % platforms.length];
+        const majorMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
+        const major = majorMatch ? majorMatch[1] : '126';
+
+        const uaGet = () =>
+          'Mozilla/5.0 (' + persona.ua + ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
+          major + '.0.0.0 Safari/537.36';
+
+        Object.defineProperty(navigator, 'userAgent', {
+          get: uaGet, enumerable: true, configurable: true
+        });
+        Object.defineProperty(navigator, 'appVersion', {
+          get: () => uaGet().replace('Mozilla/', ''), enumerable: true, configurable: true
+        });
+        Object.defineProperty(navigator, 'platform', {
+          get: () => persona.platform, enumerable: true, configurable: true
+        });
+
+        if (navigator.userAgentData) {
+          const realUAD = navigator.userAgentData;
+          const brands = persona.brands.map((brand, i) => ({
+            brand, version: i === persona.brands.length - 1 ? '99' : major
+          }));
+          Object.defineProperty(navigator, 'userAgentData', {
+            get: () => new Proxy(realUAD, {
+              get (target, prop) {
+                if (prop === 'brands') return brands;
+                if (prop === 'platform') return persona.platform === 'MacIntel' ? 'macOS'
+                  : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
+                if (prop === 'getHighEntropyValues') {
+                  return (hints) => target.getHighEntropyValues(hints).then((values) => {
+                    values.platformVersion = '10.0.0';
+                    values.fullVersionList = brands;
+                    return values;
+                  });
+                }
+                const v = Reflect.get(target, prop, target);
+                return typeof v === 'function' ? v.bind(target) : v;
+              }
+            }), enumerable: true, configurable: true
+          });
+        }
+
+        log('[shapeshift][page][ua] Hooks installed, platform:', persona.platform);
+      } catch (e) {
+        log('[shapeshift][page][ua] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // MEDIA HOOKS (MAIN world) - deterministic per input (P1 2.2 / 2.3).
+    // ========================================================================
+    if (config.enableMediaProtection) {
+      try {
+        const roll = (label, input) =>
+          hashString(seed + ':' + label + ':' + String(input)) / 4294967296;
+
+        if (HTMLMediaElement.prototype.canPlayType) {
+          const origCanPlayType = HTMLMediaElement.prototype.canPlayType;
+          HTMLMediaElement.prototype.canPlayType = function (type) {
+            const result = origCanPlayType.call(this, type);
+            if (roll('canplay', type) < 0.1) {
+              if (result === 'maybe') return 'probably';
+              if (result === 'probably') return 'maybe';
+            }
+            return result;
+          };
+        }
+
+        if (window.MediaSource && MediaSource.isTypeSupported) {
+          const origIsTypeSupported = MediaSource.isTypeSupported;
+          MediaSource.isTypeSupported = function (type) {
+            const result = origIsTypeSupported.call(this, type);
+            const nonCritical = ['av01', 'vp9', 'opus'];
+            if (nonCritical.some((c) => String(type).includes(c)) && roll('mstype', type) < 0.05) {
+              return !result;
+            }
+            return result;
+          };
+        }
+
+        if (navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo) {
+          const origDecodingInfo = navigator.mediaCapabilities.decodingInfo;
+          navigator.mediaCapabilities.decodingInfo = function (configuration) {
+            return origDecodingInfo.call(this, configuration).then((info) => {
+              if (info.powerEfficient !== undefined &&
+                  roll('power', JSON.stringify(configuration)) < 0.1) {
+                info.powerEfficient = !info.powerEfficient;
+              }
+              return info;
+            });
+          };
+        }
+
+        // Swap a private copy, keyed on (seed, kind), instead of mutating the
+        // native result in place.
+        function stableSwap (caps, label) {
+          if (!caps || !caps.codecs || caps.codecs.length < 2) return caps;
+          const codecs = caps.codecs.slice();
+          const r = roll(label, '');
+          const i = Math.floor(r * codecs.length);
+          const j = (i + 1 + Math.floor(r * 997) % (codecs.length - 1)) % codecs.length;
+          const tmp = codecs[i];
+          codecs[i] = codecs[j];
+          codecs[j] = tmp;
+          const copy = Object.assign({}, caps);
+          copy.codecs = codecs;
+          return copy;
+        }
+
+        if (window.RTCRtpSender && RTCRtpSender.getCapabilities) {
+          const orig = RTCRtpSender.getCapabilities;
+          RTCRtpSender.getCapabilities = function (kind) {
+            return stableSwap(orig.call(this, kind), 'rtp-sender');
+          };
+        }
+        if (window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities) {
+          const orig = RTCRtpReceiver.getCapabilities;
+          RTCRtpReceiver.getCapabilities = function (kind) {
+            return stableSwap(orig.call(this, kind), 'rtp-receiver');
+          };
+        }
+
+        log('[shapeshift][page][media] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][media] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // GEOLOCATION HOOKS (MAIN world)
+    // ========================================================================
+    if (config.enableGeolocationProtection && navigator.geolocation) {
+      try {
+        // P0 1.1: this block used to be a no-op - both branches called straight
+        // through to the native method, so the "Geolocation fuzzing" toggle
+        // advertised a protection the page could never observe. Offset the
+        // reported fix deterministically per origin instead.
+        const geoNoise = (config.geolocation && typeof config.geolocation.noiseLevel === 'number')
+          ? config.geolocation.noiseLevel
+          : 0.001;
+        const origGetCurrentPosition = navigator.geolocation.getCurrentPosition;
+        const origWatchPosition = navigator.geolocation.watchPosition;
+
+        // One stable offset per (seed, coordinate) pair: two reads of the same
+        // real fix must not disagree, or the shim is trivially detectable.
+        function shift (lat, lon) {
+          const dLat = ((hashString(seed + ':geo:lat:' + lat) / 4294967296) - 0.5) * geoNoise;
+          const dLon = ((hashString(seed + ':geo:lon:' + lon) / 4294967296) - 0.5) * geoNoise;
+          return { latitude: lat + dLat, longitude: lon + dLon };
+        }
+
+        // Shadow the native getters on a copy that keeps the original prototype,
+        // so `coords instanceof GeolocationCoordinates` still holds.
+        function fuzzPosition (position) {
+          if (!position || !position.coords) return position;
+          const real = position.coords;
+          const shifted = shift(real.latitude, real.longitude);
+          const coords = Object.create(Object.getPrototypeOf(real));
+          Object.defineProperties(coords, {
+            latitude: { get: () => shifted.latitude, enumerable: true, configurable: true },
+            longitude: { get: () => shifted.longitude, enumerable: true, configurable: true },
+            accuracy: { get: () => real.accuracy, enumerable: true, configurable: true },
+            altitude: { get: () => real.altitude, enumerable: true, configurable: true },
+            altitudeAccuracy: { get: () => real.altitudeAccuracy, enumerable: true, configurable: true },
+            heading: { get: () => real.heading, enumerable: true, configurable: true },
+            speed: { get: () => real.speed, enumerable: true, configurable: true }
+          });
+          const copy = Object.create(Object.getPrototypeOf(position));
+          Object.defineProperties(copy, {
+            coords: { get: () => coords, enumerable: true, configurable: true },
+            timestamp: { get: () => position.timestamp, enumerable: true, configurable: true }
+          });
+          return copy;
+        }
+
+        navigator.geolocation.getCurrentPosition = function (success, error, options) {
+          if (typeof success !== 'function') {
+            return origGetCurrentPosition.call(this, success, error, options);
+          }
+          return origGetCurrentPosition.call(this, function (position) {
+            return success(fuzzPosition(position));
+          }, error, options);
+        };
+
+        if (typeof origWatchPosition === 'function') {
+          navigator.geolocation.watchPosition = function (success, error, options) {
+            if (typeof success !== 'function') {
+              return origWatchPosition.call(this, success, error, options);
+            }
+            return origWatchPosition.call(this, function (position) {
+              return success(fuzzPosition(position));
+            }, error, options);
+          };
+        }
+
+        log('[shapeshift][page][geo] Hooks installed, noise:', geoNoise);
+      } catch (e) {
+        log('[shapeshift][page][geo] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // DETECTION RESISTANCE (MAIN world) - only the surfaces the page can read.
+    // ========================================================================
+    if (config.enableDetectionResistance) {
+      try {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => false, enumerable: true, configurable: true
+        });
+
+        if (navigator.permissions && navigator.permissions.query) {
+          const origQuery = navigator.permissions.query;
+          navigator.permissions.query = function (params) {
+            return origQuery.call(this, params).then((status) => {
+              if (params && params.name === 'notifications') {
+                return new Proxy(status, {
+                  get (t, prop) {
+                    if (prop === 'state') return Notification.permission;
+                    const v = Reflect.get(t, prop, t);
+                    return typeof v === 'function' ? v.bind(t) : v;
+                  }
+                });
+              }
+              return status;
+            });
+          };
+        }
+        log('[shapeshift][page][detection] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][detection] Failed:', e);
       }
     }
 

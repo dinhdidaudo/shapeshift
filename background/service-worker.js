@@ -6,6 +6,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   await initializeStorage();
   await checkAndRotateFingerprint();
   await setupRotationAlarm();
+  await setupSaltGuardAlarm();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -14,6 +15,7 @@ chrome.runtime.onStartup.addListener(async () => {
   await initializeStorage();
   await checkRotateOnStartup();
   await setupRotationAlarm();
+  await setupSaltGuardAlarm();
 });
 
 // Initialize statistics storage
@@ -56,7 +58,7 @@ async function initializeStorage() {
 // Listen for statistics updates from content scripts
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'UPDATE_STATS') {
-    updateStatistics(message.data, sender.tab?.url).then(() => {
+    updateStatistics(message.data, sender.tab?.url, sender.url).then(() => {
       sendResponse({ success: true });
     }).catch(error => {
       console.error('Failed to update statistics:', error);
@@ -80,6 +82,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true });
     }).catch(error => {
       console.error('Failed to reset statistics:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (message.type === 'HOOK_STATUS') {
+    reportHookStatus(message.failed, message.total, message.origin).then(diagnostics => {
+      sendResponse({ success: true, diagnostics });
+    }).catch(error => {
+      console.error('Failed to record hook status:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (message.type === 'GET_DIAGNOSTICS') {
+    getDiagnostics().then(diagnostics => {
+      sendResponse({ success: true, diagnostics });
+    }).catch(error => {
+      console.error('Failed to read diagnostics:', error);
       sendResponse({ success: false, error: error.message });
     });
     return true;
@@ -116,20 +138,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// Diagnostics (P2): which hook installers failed on the most recent page load,
+// and when. Lives in storage.session so it is per-browser-session state, never
+// synced and never written to disk; the badge is the user-visible part.
+const DIAGNOSTICS_KEY = 'ss_diagnostics';
+
+async function getDiagnostics() {
+  const result = await chrome.storage.session.get([DIAGNOSTICS_KEY]);
+  return result[DIAGNOSTICS_KEY] || {
+    failedInstallers: 0,
+    totalInstallers: 0,
+    lastFailureAt: null,
+    lastFailureOrigin: null
+  };
+}
+
+async function reportHookStatus(failed, total, origin) {
+  const previous = await getDiagnostics();
+  const diagnostics = {
+    failedInstallers: Number(failed) > 0 ? Number(failed) : 0,
+    totalInstallers: Number(total) > 0 ? Number(total) : previous.totalInstallers,
+    // Keep the last real failure around even after a clean load, so Diagnostics
+    // can say when the problem was last seen instead of going blank.
+    lastFailureAt: Number(failed) > 0 ? new Date().toISOString() : previous.lastFailureAt,
+    lastFailureOrigin: Number(failed) > 0 ? (origin || null) : previous.lastFailureOrigin
+  };
+  await chrome.storage.session.set({ [DIAGNOSTICS_KEY]: diagnostics });
+
+  try {
+    if (diagnostics.failedInstallers > 0) {
+      await chrome.action.setBadgeBackgroundColor({ color: '#e5484d' });
+      await chrome.action.setBadgeText({ text: '!' });
+    } else {
+      await chrome.action.setBadgeText({ text: '' });
+    }
+  } catch (e) {
+    // Badge updates are best-effort (no window may be open).
+  }
+
+  return diagnostics;
+}
+
 // Serialize statistics read-modify-write. Content scripts flush on independent
 // timers, so two overlapping updateStatistics() calls could both read the same
 // snapshot and the later write silently discarded the earlier increments.
 // Chaining every update onto one promise makes the cycle atomic per worker.
 let statsQueue = Promise.resolve();
 
-function updateStatistics(data, tabUrl) {
-  const run = statsQueue.then(() => applyStatistics(data, tabUrl), () => applyStatistics(data, tabUrl));
+function updateStatistics(data, tabUrl, senderUrl) {
+  const run = statsQueue.then(() => applyStatistics(data, tabUrl, senderUrl), () => applyStatistics(data, tabUrl, senderUrl));
   // Keep the chain alive after a failure without unhandled rejections.
   statsQueue = run.catch(() => {});
   return run;
 }
 
-async function applyStatistics(data, tabUrl) {
+async function applyStatistics(data, tabUrl, senderUrl) {
   try {
     const result = await chrome.storage.local.get(['ss_stats']);
     let stats = result.ss_stats || {};
@@ -137,11 +200,18 @@ async function applyStatistics(data, tabUrl) {
     // Convert Set to Array for storage, then back to Set
     let sitesProtected = new Set(stats.sitesProtectedArray || []);
 
-    // Add current origin to sites protected
-    if (tabUrl) {
+    // Add current origin to sites protected.
+    // P2: sender.tab is undefined for messages from the popup/options pages, so
+    // a future UI-originated UPDATE_STATS would silently skip this. Fall back
+    // to sender.url, and only count http(s) origins: a chrome-extension:// URL
+    // is the extension talking to itself, not a protected site.
+    const sourceUrl = tabUrl || senderUrl;
+    if (sourceUrl) {
       try {
-        const origin = new URL(tabUrl).origin;
-        sitesProtected.add(origin);
+        const parsed = new URL(sourceUrl);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          sitesProtected.add(parsed.origin);
+        }
       } catch (e) {
         // Invalid URL, skip
       }
@@ -275,6 +345,8 @@ async function setupRotationAlarm() {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'fingerprint-rotation-check') {
     await checkAndRotateFingerprint();
+  } else if (alarm.name === SALT_GUARD_ALARM) {
+    await reloadStaleTabs();
   }
 });
 
@@ -283,6 +355,11 @@ async function rotateFingerprintNow() {
   try {
     // Generate new salt (removes old one, forcing regeneration)
     await chrome.storage.local.remove('ss_salt');
+
+    // Feature 5.4: advance the generation so every already-stamped tab counts
+    // as stale and is reloaded once it is next activated (see the salt guard
+    // below). The stamp is what makes a bfcache restore detectable at all.
+    await bumpSaltGeneration();
 
     // Update rotation info
     const result = await chrome.storage.local.get(['ss_rotation_info']);
@@ -369,3 +446,108 @@ async function getRotationStatus() {
     rotateOnStartup: config.rotateOnStartup || false
   };
 }
+
+// ============================================================================
+// SALT-CHANGE GUARD (Feature 5.4)
+//
+// A tab restored from the back/forward cache is NOT re-executed: its content
+// scripts keep the hooks and the seed they were given on the original load, so
+// after a rotation that tab still advertises the previous identity. Nothing
+// noticed, because no navigation event fires on a bfcache restore.
+//
+// The guard stamps every completed tab load with the salt generation that was
+// current at that moment (storage.session, per browser session) and compares it
+// again when the tab is activated and when the periodic alarm fires. A tab
+// whose stamp is older than the live generation is reloaded so it re-derives
+// the new identity.
+// ============================================================================
+const SALT_GENERATION_KEY = 'ss_salt_generation';
+const TAB_STAMP_PREFIX = 'ss_tab_gen_';
+const SALT_GUARD_ALARM = 'salt-integrity-check';
+
+async function getSaltGeneration() {
+  const result = await chrome.storage.local.get([SALT_GENERATION_KEY]);
+  return Number(result[SALT_GENERATION_KEY]) || 0;
+}
+
+// Bumped by rotateFingerprintNow(). A missing key means generation 0, which is
+// exactly the state of a profile that has never rotated.
+async function bumpSaltGeneration() {
+  const next = (await getSaltGeneration()) + 1;
+  await chrome.storage.local.set({ [SALT_GENERATION_KEY]: next });
+  return next;
+}
+
+async function stampTab(tabId) {
+  if (typeof tabId !== 'number') return;
+  const generation = await getSaltGeneration();
+  await chrome.storage.session.set({ [TAB_STAMP_PREFIX + tabId]: generation });
+}
+
+async function isTabStale(tabId) {
+  if (typeof tabId !== 'number') return false;
+  const key = TAB_STAMP_PREFIX + tabId;
+  const result = await chrome.storage.session.get([key]);
+  const stamped = result[key];
+  // A tab we never stamped (pre-existing session, extension just updated) is
+  // not reloaded: the guard must not start by closing the user's pages.
+  if (typeof stamped !== 'number') return false;
+  return stamped < (await getSaltGeneration());
+}
+
+function isReloadable(url) {
+  return !!url && !url.startsWith('chrome://') && !url.startsWith('chrome-extension://') &&
+    !url.startsWith('devtools://') && !url.startsWith('edge://') && !url.startsWith('about:');
+}
+
+// Reload every stamped-but-stale tab. Used by the periodic alarm; the activation
+// path only ever reloads the tab the user just brought to the foreground.
+async function reloadStaleTabs() {
+  const generation = await getSaltGeneration();
+  const tabs = await chrome.tabs.query({});
+  let reloaded = 0;
+  for (const tab of tabs) {
+    if (!isReloadable(tab.url)) continue;
+    const key = TAB_STAMP_PREFIX + tab.id;
+    const result = await chrome.storage.session.get([key]);
+    const stamped = result[key];
+    if (typeof stamped !== 'number' || stamped >= generation) continue;
+    try {
+      await chrome.tabs.reload(tab.id);
+      reloaded++;
+    } catch (e) {
+      // Tab disappeared mid-loop; skip it.
+    }
+  }
+  return reloaded;
+}
+
+async function setupSaltGuardAlarm() {
+  await chrome.alarms.clear(SALT_GUARD_ALARM);
+  // 30 minutes is the shortest period Chrome reliably honours for a packed
+  // extension and is far below the shortest rotation interval the UI offers.
+  await chrome.alarms.create(SALT_GUARD_ALARM, { periodInMinutes: 30 });
+}
+
+// Stamp on every completed load, so a normal navigation refreshes the stamp and
+// only a bfcache restore can leave a tab behind.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'complete') return;
+  stampTab(tabId).catch(() => {});
+});
+
+// bfcache restores are invisible to onUpdated; activation is the hook we get.
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    if (!(await isTabStale(activeInfo.tabId))) return;
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (!isReloadable(tab.url)) return;
+    await chrome.tabs.reload(activeInfo.tabId);
+  } catch (e) {
+    // Best effort: never break tab switching over a stale stamp.
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove([TAB_STAMP_PREFIX + tabId]).catch(() => {});
+});

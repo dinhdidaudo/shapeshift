@@ -41,7 +41,7 @@ const GROUPS = {
     { key: 'useRealDistribution', name: 'Realistic resolutions', desc: 'Sample from real-world screen sizes.' },
     { key: 'enableTimezoneProtection', name: 'Timezone protection', desc: 'Offset the reported timezone.' },
     { key: 'autoRotateFingerprint', name: 'Auto rotation', desc: 'Regenerate the identity on a schedule.' },
-    { key: 'rotationIntervalHours', name: 'Rotation interval', desc: 'Hours between automatic rotations.', select: [[1, '1 hour'], [6, '6 hours'], [12, '12 hours'], [24, '24 hours'], [72, '3 days'], [168, '7 days']] },
+    { key: 'rotationIntervalHours', name: 'Rotation interval', desc: 'Hours between automatic rotations.', select: [[0.5, '30 minutes'], [1, '1 hour'], [6, '6 hours'], [12, '12 hours'], [24, '24 hours'], [72, '3 days'], [168, '7 days']] },
     { key: 'rotateOnStartup', name: 'Rotate on startup', desc: 'New identity every browser launch.' }
   ],
   groupCrypto: [
@@ -178,7 +178,7 @@ const NUMERIC_BOUNDS = {
   webglJitter: [0, 10],
   audioNoiseStrength: [0, 1],
   kdfIterations: [1, 100000],
-  rotationIntervalHours: [1, 8760]
+  rotationIntervalHours: [0.5, 8760]
 };
 
 function clampNumber(key, raw) {
@@ -236,12 +236,101 @@ function updateOverview(config) {
 }
 
 async function refreshStats() {
-  const data = await get(['ss_stats', 'ss_site_settings']);
+  const data = await get(['ss_stats', 'ss_site_settings', 'ss_rotation_info']);
   const stats = data.ss_stats || {};
   const total = (stats.totalCanvasReads || 0) + (stats.totalWebGLCalls || 0) + (stats.totalAudioCalls || 0) + (stats.totalNavigatorReads || 0) + (stats.totalWebRTCCalls || 0) + (stats.totalScreenReads || 0) + (stats.totalFontReads || 0) + (stats.totalTimezoneReads || 0) + (stats.totalSensorReads || 0) + (stats.totalMediaCodecReads || 0) + (stats.totalDrmReads || 0) + (stats.totalGeolocationReads || 0) + (stats.totalTouchReads || 0);
   const sites = Object.keys(data.ss_site_settings || {}).length;
   if ($('statSites')) $('statSites').textContent = String(sites);
   if ($('statSignals')) $('statSignals').textContent = String(total);
+  // Feature 5.9: the About pane shows the same local counters the popup
+  // aggregates. Rendering them from ss_stats keeps one source of truth, and
+  // nothing here is uploaded - these are read-only numbers on this machine.
+  if ($('aboutSites')) $('aboutSites').textContent = String(stats.sitesProtected || 0);
+  if ($('aboutSignals')) $('aboutSignals').textContent = String(total);
+  if ($('aboutRotations')) $('aboutRotations').textContent = String((data.ss_rotation_info || {}).rotationCount || 0);
+}
+
+// Diagnostics (P2): the hook installers report failures to the service worker,
+// which stores them in storage.session and raises the toolbar badge. This pane
+// is the readable half - it tells the user *which* load degraded instead of
+// leaving a red dot with no explanation.
+function diagnosticRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const text = document.createElement('div');
+  text.className = 'row-text';
+  const strong = document.createElement('strong');
+  strong.textContent = label;
+  const span = document.createElement('span');
+  span.textContent = value;
+  text.appendChild(strong);
+  text.appendChild(span);
+  row.appendChild(text);
+  return row;
+}
+
+async function renderDiagnostics() {
+  const host = $('diagnosticsBody');
+  if (!host) return;
+  host.textContent = '';
+  let diagnostics = null;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_DIAGNOSTICS' });
+    if (res && res.success) diagnostics = res.diagnostics;
+  } catch (e) { /* service worker may be restarting */ }
+  if (!diagnostics) {
+    host.appendChild(diagnosticRow('Status', 'Unavailable - reload the extension and try again.'));
+    return;
+  }
+  const failed = Number(diagnostics.failedInstallers) || 0;
+  const total = Number(diagnostics.totalInstallers) || 0;
+  host.appendChild(diagnosticRow('Last load', failed > 0
+    ? failed + ' of ' + (total || '?') + ' installers failed'
+    : 'All installers succeeded'));
+  if (diagnostics.lastFailureAt) {
+    host.appendChild(diagnosticRow('Last failure', new Date(diagnostics.lastFailureAt).toLocaleString()));
+  }
+  if (diagnostics.lastFailureOrigin) {
+    host.appendChild(diagnosticRow('Last failure origin', diagnostics.lastFailureOrigin));
+  }
+}
+
+// Feature 5.1: import / export. Only ssConfig travels; the salt lives in
+// chrome.storage.local and is deliberately never written to the file, so a
+// shared profile cannot clone the identity of the machine that exported it.
+async function exportConfigToFile() {
+  const stored = (await get(['ssConfig'])).ssConfig || {};
+  const payload = {
+    app: 'ShapeShift',
+    kind: 'ssConfig',
+    exportedAt: new Date().toISOString(),
+    config: stored
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'shapeshift-config.json';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+async function importConfigFromFile(file) {
+  const text = await file.text();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error('not valid JSON');
+  }
+  const incoming = parsed && typeof parsed === 'object' && parsed.config ? parsed.config : parsed;
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    throw new Error('missing a config object');
+  }
+  // Only ssConfig is written. A file containing ss_salt is ignored on purpose.
+  await set({ ssConfig: incoming });
 }
 
 async function renderSites() {
@@ -293,6 +382,10 @@ async function main() {
   updateOverview(config);
   refreshStats();
   renderSites();
+  // Populate the Hook health card on load too. renderDiagnostics() was only
+  // reachable from the Advanced nav click and the Refresh button, so the pane
+  // showed placeholder text until the user interacted with it.
+  renderDiagnostics();
   if ($('aboutVersion')) {
     try { $('aboutVersion').textContent = chrome.runtime.getManifest().version; } catch (e) { }
   }
@@ -314,7 +407,8 @@ async function main() {
       if ($('panelTitle')) $('panelTitle').textContent = meta[0];
       if ($('panelSub')) $('panelSub').textContent = meta[1];
       if (target === 'sites') renderSites();
-      if (target === 'overview') { updateOverview(collect()); refreshStats(); }
+      if (target === 'advanced') renderDiagnostics();
+      if (target === 'about' || target === 'overview') { updateOverview(collect()); refreshStats(); }
     });
   }
 
@@ -350,6 +444,38 @@ async function main() {
     });
   }
 
+  if ($('refreshDiagnosticsBtn')) {
+    $('refreshDiagnosticsBtn').addEventListener('click', function () {
+      renderDiagnostics();
+      toast('Diagnostics refreshed');
+    });
+  }
+
+  if ($('exportConfigBtn')) {
+    $('exportConfigBtn').addEventListener('click', async function () {
+      await exportConfigToFile();
+      toast('Configuration exported');
+    });
+  }
+
+  if ($('importConfigBtn') && $('importConfigFile')) {
+    $('importConfigBtn').addEventListener('click', function () {
+      $('importConfigFile').click();
+    });
+    $('importConfigFile').addEventListener('change', async function (event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      try {
+        await importConfigFromFile(file);
+        toast('Configuration imported - reloading');
+        setTimeout(function () { location.reload(); }, 600);
+      } catch (e) {
+        toast('Import failed: ' + ((e && e.message) || 'invalid file'));
+      }
+      event.target.value = '';
+    });
+  }
+
   if ($('resetAllBtn')) {
     $('resetAllBtn').addEventListener('click', async function () {
       await remove('ssConfig');
@@ -360,9 +486,18 @@ async function main() {
 
   if ($('rotateNowBtn')) {
     $('rotateNowBtn').addEventListener('click', async function () {
-      await remove('ss_salt');
-      const rotation = (await get(['ss_rotation_info'])).ss_rotation_info || {};
-      await set({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
+      // Same path as the popup: let the service worker own the rotation so the
+      // notification, rotation info and alarm re-arm all happen exactly once.
+      let rotated = false;
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'ROTATE_NOW' });
+        rotated = !!(res && res.success);
+      } catch (e) { /* fall through to the local path */ }
+      if (!rotated) {
+        await remove('ss_salt');
+        const rotation = (await get(['ss_rotation_info'])).ss_rotation_info || {};
+        await set({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
+      }
       toast('New identity generated - reloading tabs');
       refreshStats();
       // A new salt only reaches the page on the next load, so reload every

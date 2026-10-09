@@ -52,11 +52,23 @@
         throw new Error("Fingerprint bootstrap missing prerequisites");
       }
 
+      // P0 1.4: the nonce handshake must not sit *behind* the asynchronous
+      // chrome.storage reads. It used to run after loadConfig()+getSalt(), so
+      // the gap between the injector publishing READY at document_start and
+      // receiving SS_INIT_PAGE_HOOKS was storage latency + salt latency + the
+      // nonce poll. Kick the handshake off first so it overlaps those reads;
+      // page inline scripts get real APIs for a strictly shorter window.
+      const pageNoncePromise = waitForPageNonce(500);
+
       // Load stored config first (merges with defaults)
       const config = await loadConfig();
 
       // Check if current site is whitelisted (protection disabled)
-      if (chrome?.storage?.local) {
+      // P2: optional chaining does NOT protect an undeclared identifier - if
+      // `chrome` is undefined (unit tests, non-extension context) `chrome?.x`
+      // throws ReferenceError instead of yielding undefined. Guard the name
+      // itself, exactly like config.js already does.
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
         try {
           const siteResult = await new Promise((resolve) => {
             chrome.storage.local.get(['ss_site_settings'], (result) => {
@@ -144,7 +156,16 @@
       // SS_INIT_PAGE_HOOKS message. `protocol` lets a future release change the
       // payload shape without old injectors acting on a message they do not
       // understand.
-      const pageNonce = await waitForPageNonce(500);
+      // P0 1.4: the injector refuses SS_INIT_PAGE_HOOKS unless the nonce it
+      // published is echoed back. A single 500 ms wait could time out while the
+      // injector was still starting, which silently disabled every MAIN-world
+      // hook with no retry and no signal. Announce HELLO again and retry before
+      // giving up; the injector re-announces READY on every HELLO.
+      let pageNonce = await pageNoncePromise;
+      for (let attempt = 0; !pageNonce && attempt < 3; attempt++) {
+        pageNonce = await waitForPageNonce(500);
+      }
+
       window.postMessage({
         type: 'SS_INIT_PAGE_HOOKS',
         protocol: 1,
@@ -152,6 +173,10 @@
         config: config,
         seed: seed
       }, location.origin);
+
+      if (config.debug) {
+        console.log('[shapeshift][bootstrap] page-world nonce:', pageNonce ? 'ok' : 'MISSING');
+      }
 
       if (config.debug) {
         console.log('[shapeshift][bootstrap] Sent config to page-world injector');

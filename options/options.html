@@ -134,6 +134,22 @@
           <div class="card-head"><h3>Diagnostics</h3><span class="muted">Console verbosity</span></div>
           <div id="groupDebug" class="rows"></div>
         </div>
+        <div class="card">
+          <div class="card-head"><h3>Hook health</h3><span class="muted">Installers that failed on the last page load</span></div>
+          <div id="diagnosticsBody" class="rows"></div>
+          <div class="site-add">
+            <button class="btn ghost" id="refreshDiagnosticsBtn" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Configuration backup</h3><span class="muted">Move your profile between machines</span></div>
+          <p class="muted card-note">Export writes your current settings to a JSON file. Import replaces them; the salt stays local and is never exported.</p>
+          <div class="site-add">
+            <button class="btn ghost" id="exportConfigBtn" type="button">Export JSON</button>
+            <button class="btn ghost" id="importConfigBtn" type="button">Import JSON</button>
+            <input type="file" id="importConfigFile" accept="application/json,.json" hidden>
+          </div>
+        </div>
       </section>
 
       <section class="panel" id="panel-about">
@@ -146,6 +162,9 @@
             <li><span>Data</span><strong>Local only, never uploaded</strong></li>
             <li><span>Licence</span><strong>MIT</strong></li>
             <li><span>Source</span><strong><a href="https://github.com/dinhdidaudo/shapeshift" target="_blank" rel="noreferrer">dinhdidaudo/shapeshift</a></strong></li>
+            <li><span>Origins protected</span><strong id="aboutSites">0</strong></li>
+            <li><span>Signals intercepted</span><strong id="aboutSignals">0</strong></li>
+            <li><span>Identities rotated</span><strong id="aboutRotations">0</strong></li>
           </ul>
         </div>
       </section>

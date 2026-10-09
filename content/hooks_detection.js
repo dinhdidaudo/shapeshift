@@ -122,31 +122,11 @@
       }
     });
 
-    // Prevent Chrome extension detection via chrome.runtime
-    safeWrap(() => {
-      // Some sites test for chrome.runtime to detect extensions
-      // We can't remove it (extension needs it), but add timing resistance
-      if (!window.chrome || !window.chrome.runtime) return;
-
-      const origRuntime = window.chrome.runtime;
-
-      // Wrap common detection methods
-      if (origRuntime.sendMessage) {
-        const origSendMessage = origRuntime.sendMessage;
-        if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(origSendMessage)) {
-          globalThis.ssStealth.markPatched(origSendMessage);
-
-          window.chrome.runtime.sendMessage = function() {
-            if (globalThis.ssTimingUtils) {
-              globalThis.ssTimingUtils.randomDelaySync();
-            }
-            return origSendMessage.apply(this, arguments);
-          };
-        }
-      }
-
-      log('[shapeshift][detection] chrome.runtime wrapped with timing resistance');
-    });
+    // P1 2.12: the chrome.runtime object visible here belongs to the ISOLATED
+    // content-script world. A page script cannot observe it, so wrapping
+    // sendMessage protected nothing while adding an artificial delay to every
+    // internal message - including the stats_tracker UPDATE_STATS flush that
+    // wakes the service worker. Removed entirely rather than slowed down.
 
     // Prevent navigator.webdriver detection (automation detection)
     safeWrap(() => {

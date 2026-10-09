@@ -64,9 +64,43 @@
       '-780': ['Pacific/Tongatapu', 'Pacific/Apia']
     };
 
-    // Find timezones with the SAME offset as real timezone
+    // P0 1.5: a zone only stays internally consistent when its offset matches
+    // the real one on EVERY date the page might probe, not just today. Two
+    // zones can share a winter offset yet differ in DST rules
+    // (America/Phoenix vs America/Denver); resolvedOptions().timeZone would
+    // then contradict getTimezoneOffset() and formatter.format() half the
+    // year. Filter candidates on today AND ~6 months out, exactly like the
+    // MAIN-world injector does.
+    function zoneOffsetMinutes (zone, date) {
+      try {
+        const dtf = new Intl.DateTimeFormat('en-US', {
+          timeZone: zone, hour12: false,
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+        const parts = dtf.formatToParts(date);
+        const m = {};
+        for (let i = 0; i < parts.length; i++) {
+          if (parts[i].type !== 'literal') m[parts[i].type] = parts[i].value;
+        }
+        const asUTC = Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second);
+        return Math.round((asUTC - date.getTime()) / 60000);
+      } catch (e) {
+        return null;
+      }
+    }
+
     const offsetKey = String(realOffset);
-    const availableZones = timezonesByOffset[offsetKey] || [];
+    const candidates = timezonesByOffset[offsetKey] || [];
+    const realZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const sampleA = new Date();
+    const sampleB = new Date(Date.now() + 182 * 24 * 60 * 60 * 1000);
+    const realA = zoneOffsetMinutes(realZone, sampleA);
+    const realB = zoneOffsetMinutes(realZone, sampleB);
+    const availableZones = candidates.filter(function (z) {
+      return zoneOffsetMinutes(z, sampleA) === realA &&
+             zoneOffsetMinutes(z, sampleB) === realB;
+    });
 
     let spoofedTimezone = null;
 

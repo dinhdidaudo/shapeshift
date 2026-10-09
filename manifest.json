@@ -86,7 +86,7 @@
                 "content/test_fingerprint_page.js"
             ],
             "matches": [
-                "https://*/*"
+                "<all_urls>"
             ]
         }
     ]

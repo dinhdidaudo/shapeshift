@@ -5,10 +5,21 @@
 
   installers.push(function installMediaHooks (env) {
     if (!env || !env.config?.enableMediaProtection) return;
-    const prng = env.prngFor ? env.prngFor('media') : env.prng;
     const { config } = env;
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
+
+    // P1 2.2: capability answers must be stable for a given input. The old code
+    // drew from a streaming PRNG on every call, so canPlayType('...') could
+    // answer "maybe" on one call and "probably" on the next — a trivial detect
+    // signal, and a real hazard for a player that picks a codec from the first
+    // answer. Derive the decision from (seed, input) instead.
+    const seed = (env.seed >>> 0) || 0;
+    const hashString = globalThis.ssHashString;
+    function stableRoll (label, input) {
+      if (!hashString) return 1; // never flip when the hash is unavailable
+      return hashString(seed + ':' + label + ':' + String(input)) / 4294967296;
+    }
 
     function safeWrap (fn) {
       try {
@@ -39,9 +50,9 @@
 
           const result = origCanPlayType.call(this, type);
 
-          // Randomly change "maybe" to "probably" or vice versa (10% chance)
-          // This adds noise without breaking functionality
-          if (prng() < 0.1) {
+          // Deterministically change "maybe" to "probably" or vice versa for
+          // ~10% of (type) inputs. Same input -> same answer, every call.
+          if (stableRoll('canplay', type) < 0.1) {
             if (result === 'maybe') {
               log(`[shapeshift][media] canPlayType: Changed "maybe" to "probably" for ${type}`);
               return 'probably';
@@ -79,7 +90,7 @@
           const nonCriticalCodecs = ['av01', 'vp9', 'opus'];
           const isNonCritical = nonCriticalCodecs.some(codec => type.includes(codec));
 
-          if (isNonCritical && prng() < 0.05) {
+          if (isNonCritical && stableRoll('mstype', type) < 0.05) {
             log(`[shapeshift][media] isTypeSupported: Flipped result for ${type}`);
             return !result;
           }
@@ -106,9 +117,10 @@
 
           const info = await origDecodingInfo.call(this, configuration);
 
-          // Add subtle variations to the results
-          // Occasionally flip powerEfficient (10% chance)
-          if (prng() < 0.1 && info.powerEfficient !== undefined) {
+          // Add subtle variations to the results.
+          // Deterministic per configuration so two decodingInfo() calls for the
+          // same input agree (10% of inputs flip).
+          if (stableRoll('power', JSON.stringify(configuration)) < 0.1 && info.powerEfficient !== undefined) {
             info.powerEfficient = !info.powerEfficient;
             log('[shapeshift][media] decodingInfo: Flipped powerEfficient');
           }
@@ -202,7 +214,7 @@
 
           // Add very rare flips for uncommon formats (5% chance)
           const uncommonFormats = ['video/av1', 'audio/opus'];
-          if (uncommonFormats.some(fmt => type.includes(fmt)) && prng() < 0.05) {
+          if (uncommonFormats.some(fmt => type.includes(fmt)) && stableRoll('rectype', type) < 0.05) {
             log(`[shapeshift][media] MediaRecorder.isTypeSupported: Flipped for ${type}`);
             return !result;
           }
@@ -229,17 +241,22 @@
 
           const capabilities = origGetCapabilities.call(this, kind);
 
-          // Shuffle codec order slightly (deterministic)
+          // P1 2.3: the swap used to be drawn from a streaming PRNG on every
+          // call and applied to the object the native method returned, so two
+          // getCapabilities('video') calls disagreed and the shared native
+          // result was mutated in place. Swap a private copy, indexed from
+          // (seed, kind) so the order is stable across calls.
           if (capabilities && capabilities.codecs && capabilities.codecs.length > 1) {
-            const codecs = [...capabilities.codecs];
-
-            // Swap two random codecs
-            const idx1 = Math.floor(prng() * codecs.length);
-            const idx2 = Math.floor(prng() * codecs.length);
+            const codecs = capabilities.codecs.slice();
+            const roll = stableRoll('rtp-sender', kind || '');
+            const idx1 = Math.floor(roll * codecs.length);
+            const idx2 = (idx1 + 1 + Math.floor(roll * 997) % (codecs.length - 1)) % codecs.length;
             [codecs[idx1], codecs[idx2]] = [codecs[idx2], codecs[idx1]];
 
-            capabilities.codecs = codecs;
+            const copy = Object.assign({}, capabilities);
+            copy.codecs = codecs;
             log(`[shapeshift][media] RTCRtpSender.getCapabilities: Shuffled codec order for ${kind}`);
+            return copy;
           }
 
           return capabilities;
@@ -264,16 +281,18 @@
 
           const capabilities = origGetCapabilities.call(this, kind);
 
-          // Shuffle codec order slightly
+          // Same fix as the sender above: copy, then swap deterministically.
           if (capabilities && capabilities.codecs && capabilities.codecs.length > 1) {
-            const codecs = [...capabilities.codecs];
-
-            const idx1 = Math.floor(prng() * codecs.length);
-            const idx2 = Math.floor(prng() * codecs.length);
+            const codecs = capabilities.codecs.slice();
+            const roll = stableRoll('rtp-receiver', kind || '');
+            const idx1 = Math.floor(roll * codecs.length);
+            const idx2 = (idx1 + 1 + Math.floor(roll * 997) % (codecs.length - 1)) % codecs.length;
             [codecs[idx1], codecs[idx2]] = [codecs[idx2], codecs[idx1]];
 
-            capabilities.codecs = codecs;
+            const copy = Object.assign({}, capabilities);
+            copy.codecs = codecs;
             log(`[shapeshift][media] RTCRtpReceiver.getCapabilities: Shuffled codec order for ${kind}`);
+            return copy;
           }
 
           return capabilities;

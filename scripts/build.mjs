@@ -26,13 +26,15 @@ const RUNTIME = [
 
 const DOCS = ['README.md', 'LICENSE', 'CHANGELOG.md'];
 
-function runGate () {
-  console.log('Running verify gate...');
-  execFileSync(process.execPath, [join(ROOT, 'scripts', 'verify.mjs')], { stdio: 'inherit' });
+function runGate (args) {
+  console.log('Running verify gate' + (args.length ? ' (' + args.join(' ') + ')' : '') + '...');
+  execFileSync(process.execPath, [join(ROOT, 'scripts', 'verify.mjs')].concat(args), { stdio: 'inherit' });
 }
 
 function main () {
-  runGate();
+  // The first pass must ignore dist/ freshness: it still holds the previous
+  // build, and the structural checks are what we want to validate pre-copy.
+  runGate(['--no-dist']);
 
   if (existsSync(OUT)) rmSync(OUT, { recursive: true, force: true });
   mkdirSync(OUT, { recursive: true });
@@ -51,6 +53,11 @@ function main () {
     const src = join(ROOT, doc);
     if (existsSync(src)) cpSync(src, join(OUT, doc));
   }
+
+  // Second pass now that dist/ has been rewritten: this is what actually
+  // enforces "dist/ matches the runtime sources". Running it twice only
+  // doubled the gate output; one pass is enough.
+  runGate([]);
 
   console.log(`\nBuilt ShapeShift ${manifest.version} -> ${OUT}`);
   console.log('Load it with chrome://extensions -> Developer mode -> Load unpacked.');

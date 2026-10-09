@@ -93,7 +93,10 @@
           if (globalThis.ssStatsTracker) {
             globalThis.ssStatsTracker.increment('canvasReads');
           }
-          ctx = this.getContext("2d", { willReadFrequently: true });
+          // Plain getContext: passing willReadFrequently here can silently
+          // switch an existing canvas to software rendering and warns when the
+          // canvas already has a 2d context created with other attributes.
+          ctx = this.getContext("2d");
           if (ctx && origGetImageData) {
             snapshot = noisedCopyOf(ctx, this.width, this.height);
             ctx.putImageData(snapshot.noised, 0, 0);
@@ -122,7 +125,7 @@
           if (globalThis.ssStatsTracker) {
             globalThis.ssStatsTracker.increment('canvasReads');
           }
-          const ctx = this.getContext("2d", { willReadFrequently: true });
+          const ctx = this.getContext("2d");
           if (ctx && origGetImageData) {
             const snapshot = noisedCopyOf(ctx, this.width, this.height);
             this.__ssCtx = ctx;
