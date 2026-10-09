@@ -59,7 +59,7 @@ export function markGradient (id) {
 // copies can share one document without stealing each other's paint server.
 export function markSvg ({ id, size }) {
   const parts = markParts();
-  return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="none">` +
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="none">` +
     `<defs>${markGradient(id)}</defs>` +
     `<g transform="${parts.transform}">` +
     `<rect ${parts.rect} stroke="url(#${id})" stroke-width="${round(MARK.stroke)}"/>` +
