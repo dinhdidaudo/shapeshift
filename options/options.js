@@ -64,7 +64,8 @@ const GROUPS = {
   ],
   groupDebug: [
     { key: 'notifyOnRotation', name: 'Notify on rotation', desc: 'Show a system notification when the identity rotates.' },
-    { key: 'reloadTabsOnRotation', name: 'Reload tabs on rotation', desc: 'Refresh open http(s) tabs so they pick up the new identity.' },
+    { key: 'reloadTabsOnRotation', name: 'Reload tabs on rotation', desc: 'Refresh the focused tab of each window so it picks up the new identity. Off by default: reloading every tab on every rotation looks like a device change to every site at once.' },
+    { key: 'clearSiteDataOnRotation', name: 'Clear site data on rotation', desc: 'Also erase cookies and site storage for the pages you visit, so the new identity gets a fresh session. This logs you out of those sites.' },
     { key: 'debug', name: 'Debug logging', desc: 'Verbose console output for troubleshooting.' }
   ]
 };
@@ -621,7 +622,13 @@ async function main() {
         rotated = !!(res && res.success);
       } catch (e) { /* fall through to the local path */ }
       if (!rotated) {
-        await remove('ss_salt');
+        // Per-origin salts live under "ss_salt:<origin>", so removing the single
+        // legacy key would no longer rotate anything.
+        try {
+          const allSalts = await chrome.storage.local.get(null);
+          const saltKeys = Object.keys(allSalts || {}).filter((k) => k === 'ss_salt' || k.indexOf('ss_salt:') === 0);
+          if (saltKeys.length) await chrome.storage.local.remove(saltKeys);
+        } catch (e) { /* best effort */ }
         const rotation = (await get(['ss_rotation_info'])).ss_rotation_info || {};
         await set({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
       }

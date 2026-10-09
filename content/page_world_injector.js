@@ -1625,19 +1625,47 @@
         // from the same key.
         const platforms = platformsAll.filter((p) => p.os === personaOs);
         const persona = platforms[hashString(seed + ':ua') % platforms.length];
-        const majorMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
-        const major = majorMatch ? majorMatch[1] : '126';
 
-        // P0: a real UA build number is a 4-part Chrome version such as
-        // 126.0.6478.127; the old 'major.0.0.0' shape does not exist in the wild
-        // and was a one-line oracle. Derive a stable, plausible build from the
-        // seed instead.
+        // P0 (real Chrome versions, Cloudflare UA check). This used to be
+        //     build = 6000 + (hash % 500);  patch = (hash >>> 8) % 200;
+        // which produced strings like `Chrome/126.0.6234.187` - build numbers
+        // that have never shipped. Cloudflare keeps a database of real Chrome
+        // releases and binds `cf_clearance` to the exact User-Agent that earned
+        // it, so a fabricated build both fails the plausibility check and
+        // invalidates the clearance cookie on the next navigation: the "verify
+        // you are human" loop after a rotation.
+        //
+        // MAIN cannot load core/chrome-versions.js (manifest.json injects this
+        // file alone into the MAIN world), so the table is inlined here. It MUST
+        // stay identical to core/chrome-versions.js - that file carries the
+        // matching comment. Both worlds fold the SAME (seed + ':uabuild') key
+        // with the SAME FNV-1a, so they always land on the same real release.
+        const CHROME_STABLE_VERSIONS = [
+          '126.0.6478.127', '127.0.6533.100', '128.0.6613.120', '129.0.6668.90',
+          '130.0.6723.119', '131.0.6778.86', '132.0.6834.84', '133.0.6943.99',
+          '134.0.6998.89', '135.0.7049.85', '136.0.7103.93', '137.0.7151.68',
+          '138.0.7204.97', '139.0.7258.66', '140.0.7339.80', '141.0.7390.55'
+        ];
         const buildHash = hashString(seed + ':uabuild');
-        const build = 6000 + (buildHash % 500);
-        const patch = (buildHash >>> 8) % 200;
+        const realMajorMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
+        const realMajor = realMajorMatch ? Number(realMajorMatch[1]) : null;
+        // Never advertise a version older than the browser actually is: a
+        // Chrome/141 client claiming Chrome/126 is a downgrade no real update
+        // path produces, and it is the shape a spoofing extension has.
+        let versionCandidates = CHROME_STABLE_VERSIONS;
+        if (realMajor !== null) {
+          const fresh = CHROME_STABLE_VERSIONS.filter((v) => Number(v.split('.')[0]) >= realMajor);
+          if (fresh.length > 0) versionCandidates = fresh;
+        }
+        const chromeVersion = versionCandidates[buildHash % versionCandidates.length];
+        const versionParts = chromeVersion.split('.');
+        const major = versionParts[0];
+        const minor = versionParts[1];
+        const build = versionParts[2];
+        const patch = versionParts[3];
         const uaGet = () =>
           'Mozilla/5.0 (' + persona.ua + ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
-          major + '.0.' + build + '.' + patch + ' Safari/537.36';
+          chromeVersion + ' Safari/537.36';
 
         Object.defineProperty(navProto, 'userAgent', {
           get: uaGet, enumerable: false, configurable: true
@@ -1661,9 +1689,12 @@
           // oracles, so derive them from the persona.
           const platformVersion = persona.platform === 'Win32' ? '10.0.0'
             : (persona.platform === 'MacIntel' ? '10.15.7' : '6.6.0');
+          // P0: every brand now carries the SAME real 4-part release, and the
+          // grease brand keeps the conventional '99.0.0.0' shape real Chrome
+          // uses, so fullVersionList can never look like a mixed machine.
           const fullVersionList = brands.map((b) => ({
             brand: b.brand,
-            version: b.version + '.0.' + build + '.' + patch
+            version: b.version === '99' ? '99.0.0.0' : chromeVersion
           }));
 
           // P1 identity stability: the Proxy used to be constructed inside the

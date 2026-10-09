@@ -109,7 +109,9 @@
         }
       }
 
-      const salt = await getSalt();
+      // P0 (per-origin salt): pass the origin so a rotation for one site does
+      // not invalidate the identity every other site already has a session for.
+      const salt = await getSalt(config.perOriginFingerprint ? location.origin : '');
       const baseSeed = hashString(String(salt));
       const seed = config.perOriginFingerprint ? deriveSeed(salt, location.origin) : baseSeed;
       const prng = createPRNG(seed);

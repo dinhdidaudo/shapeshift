@@ -70,7 +70,12 @@
       'ssHookInstallers', 'ssTestFingerprint', 'ssTestFingerprintReport', 'ssTimingUtils', 'ssStatsTracker',
       // P2 7.1: the seed-epoch accessors are part of the same namespace and
       // would otherwise be the only ss* globals visible to Object.keys().
-      'ssSeedEpoch', 'ssBumpSeedEpoch'
+      'ssSeedEpoch', 'ssBumpSeedEpoch',
+      // Anti-fraud §1: core/chrome-versions.js exposes the real-Chrome version
+      // table and its picker to the ISOLATED world (page_world_injector.js
+      // inlines its own copy for the MAIN world). Both names would otherwise
+      // be enumerable and give the extension away in one Object.keys() call.
+      'ssChromeStableVersions', 'ssPickChromeVersion'
     ];
 
     makeNonEnumerable.forEach(prop => {

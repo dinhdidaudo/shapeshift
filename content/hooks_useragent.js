@@ -118,9 +118,21 @@
     // therefore saw two different build numbers for one machine - a cross-world
     // oracle. Derive the identical build/patch from the identical ':uabuild' key
     // and the same persona platform string as page_world_injector.js.
+    //
+    // P0 (Cloudflare UA check): the old 6000+(hash%500) / (hash>>>8)%200 pair
+    // produced versions like `126.0.6234.187` that have never shipped. Bot
+    // management keeps a database of real Chrome releases and binds
+    // `cf_clearance` to the exact User-Agent that earned it, so a fabricated
+    // build number both fails the plausibility check and invalidates the
+    // clearance cookie on the next navigation - the "verify you are human"
+    // loop after a rotation. Pick from core/chrome-versions.js instead.
     const uaBuildHash = uaHash ? uaHash(uaSeed + ':uabuild') : 0;
-    const uaBuild = 6000 + (uaBuildHash % 500);
-    const uaBuildPatch = (uaBuildHash >>> 8) % 200;
+    const pickVersion = globalThis.ssPickChromeVersion;
+    const uaVersion = pickVersion
+      ? pickVersion(uaBuildHash)
+      : { major: '126', minor: '0', build: '6478', patch: '127' };
+    const uaBuild = uaVersion.build;
+    const uaBuildPatch = uaVersion.patch;
 
     // Hook navigator.userAgent - rebuild the Chrome version like MAIN does
     safeWrap(() => {
@@ -135,7 +147,12 @@
       // oracle this pair of hooks exists to remove. Always rebuild, with the same
       // fallback major MAIN uses.
       const chromeMatch = origUserAgent.match(/Chrome\/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
-      const major = chromeMatch ? chromeMatch[1] : '126';
+      const realMajor = chromeMatch ? Number(chromeMatch[1]) : null;
+      // P0: prefer the picked release's own major, so major/minor/build/patch
+      // are one coherent 4-part version. `realMajor` is only the fallback for
+      // a UA-reduced build, where navigator.userAgent carries no Chrome token.
+      const major = realMajor !== null && realMajor > Number(uaVersion.major)
+        ? String(realMajor) : uaVersion.major;
       const platformUa = platformCategory === 'mac'
         ? 'Macintosh; Intel Mac OS X 10_15_7'
         : (platformCategory === 'linux'
@@ -143,9 +160,9 @@
           : 'Windows NT 10.0; Win64; x64');
       const modifiedUserAgent = 'Mozilla/5.0 (' + platformUa +
         ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
-        major + '.0.' + uaBuild + '.' + uaBuildPatch + ' Safari/537.36';
+        major + '.' + uaVersion.minor + '.' + uaBuild + '.' + uaBuildPatch + ' Safari/537.36';
 
-      log('[shapeshift][useragent] Rebuilt Chrome version: ' + major + '.0.' + uaBuild + '.' + uaBuildPatch);
+      log('[shapeshift][useragent] Rebuilt Chrome version: ' + major + '.' + uaVersion.minor + '.' + uaBuild + '.' + uaBuildPatch);
 
       try {
         Object.defineProperty(navTarget, 'userAgent', {
@@ -193,7 +210,9 @@
       // had no `Chrome/<4-part>` token, while MAIN still advertised the rebuilt
       // string - one read, two answers.
       const chromeMatch = origUserAgent.match(/Chrome\/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
-      const major = chromeMatch ? chromeMatch[1] : '126';
+      const realMajor = chromeMatch ? Number(chromeMatch[1]) : null;
+      const major = realMajor !== null && realMajor > Number(uaVersion.major)
+        ? String(realMajor) : uaVersion.major;
       const platformUa = platformCategory === 'mac'
         ? 'Macintosh; Intel Mac OS X 10_15_7'
         : (platformCategory === 'linux'
@@ -201,7 +220,7 @@
           : 'Windows NT 10.0; Win64; x64');
       const modifiedAppVersion = '5.0 (' + platformUa +
         ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
-        major + '.0.' + uaBuild + '.' + uaBuildPatch + ' Safari/537.36';
+        major + '.' + uaVersion.minor + '.' + uaBuild + '.' + uaBuildPatch + ' Safari/537.36';
 
       try {
         Object.defineProperty(navTarget, 'appVersion', {
@@ -292,7 +311,9 @@
       }));
       const fullVersionList = brands.map((b) => ({
         brand: b.brand,
-        version: b.version + '.0.' + uaBuild + '.' + uaBuildPatch
+        version: b.version === '99'
+          ? '99.0.0.0'
+          : b.version + '.' + uaVersion.minor + '.' + uaBuild + '.' + uaBuildPatch
       }));
       // OS-derived, like MAIN: a Windows platformVersion string on a macOS or
       // Linux persona is a cross-field contradiction no real Chrome emits.

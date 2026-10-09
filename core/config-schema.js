@@ -62,7 +62,25 @@
     // Security §3: rotation used to reload every open tab and raise an OS
     // notification with no way to opt out. Both are now explicit switches so
     // the extension never acts on tabs the user did not ask it to touch.
-    notifyOnRotation: true, reloadTabsOnRotation: true
+    //
+    // Anti-fraud §1: reloadTabsOnRotation defaults to FALSE. Reloading every
+    // open tab made one rotation look like a hundred device changes to every
+    // site the user had open - including sites with a live login session - so
+    // each tab presented a brand-new fingerprint on an unchanged session
+    // cookie. That is precisely the session-hijacking pattern Cloudflare
+    // challenges. When the user does opt in, only the ACTIVE tab of each
+    // window is reloaded (see rotationReloadScope), so the blast radius of one
+    // rotation stays one page.
+    notifyOnRotation: true, reloadTabsOnRotation: false,
+    // 'active' (default) reloads only the focused tab of each window; 'all'
+    // restores the old, invasive behaviour for users who ask for it.
+    rotationReloadScope: 'active',
+    // Anti-fraud §1: a rotation that leaves the session cookies untouched is
+    // the strongest hijack signal there is - a new machine on an old session.
+    // Clearing the site's cookies and storage makes the new identity coherent
+    // (new device AND new session), at the cost of logging the user out. It is
+    // therefore opt-in and defaults to false.
+    clearSiteDataOnRotation: false
   };
 
   // Legacy flat option keys -> nested config groups. The Options page still

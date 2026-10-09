@@ -47,7 +47,12 @@ if (manifest) {
   manifest.author === 'Phạm Văn Định' ? ok('author is Phạm Văn Định') : fail('author is Phạm Văn Định', String(manifest.author));
   /^[0-9]+[.][0-9]+[.][0-9]+$/.test(String(manifest.version)) ? ok('version is semver') : fail('version is semver');
 
-  const allowed = new Set(['storage', 'tabs', 'alarms', 'notifications']);
+  // browsingData is required by the opt-in "clear site data on rotation"
+  // switch (service-worker.js -> rotateFingerprintNow): without it the wipe
+  // silently failed and a rotation kept the old session cookies, which is the
+  // hijack shape Cloudflare challenges. It is listed here because an
+  // unexpected permission must still fail the gate.
+  const allowed = new Set(['storage', 'tabs', 'alarms', 'notifications', 'browsingData']);
   const extra = (manifest.permissions || []).filter((p) => !allowed.has(p));
   extra.length === 0 ? ok('no unexpected permissions') : fail('no unexpected permissions', extra.join(', '));
 
@@ -526,7 +531,9 @@ siteFailures.length === 0
   : fail('per-site allowlist UI writes and clears ss_site_settings', siteFailures.join(', '));
 
 section('storage contract');
-const ALLOWED_KEYS = new Set(['ssConfig', 'ss_salt', 'ss_stats', 'ss_site_settings', 'ss_rotation_info', 'ss_diagnostics']);
+// 'ss_salt:' is the per-origin form: core/salts.js stores one salt per origin as
+// 'ss_salt:<origin>', so the prefix itself is a legal key token.
+const ALLOWED_KEYS = new Set(['ssConfig', 'ss_salt', 'ss_salt:', 'ss_stats', 'ss_site_settings', 'ss_rotation_info', 'ss_diagnostics']);
 // P2: this used to look only at chrome.storage.local with single-quoted
 // literals. A stray key written to .sync or .session broke the same contract,
 // and core/salts.js writes its keys with double quotes, so the old check never

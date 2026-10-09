@@ -1,13 +1,22 @@
 // Persistent salt management using chrome.storage.local.
+//
+// P0 (per-origin salt): this used to keep ONE install-wide salt under the
+// single key "ss_salt", so one rotation changed the identity of EVERY site at
+// once - including sites holding a live login session. A brand-new device on an
+// unchanged session is exactly the session-hijacking pattern anti-fraud systems
+// challenge, so the salt is now keyed per origin ("ss_salt:<origin>"). A
+// rotation then only invalidates the site it was asked to rotate, and every
+// other site keeps the identity its session was created with.
+//
+// An empty scope keeps the legacy single key, so a caller that does not know
+// its origin (or a user who disabled per-origin fingerprints) still works.
 (function () {
   const STORAGE_KEY = "ss_salt";
-  let cachedSalt = null;
-  // P1 (tab race): two tabs could both read null, both generate a salt and both
-  // write. The re-read below resolved the winner, but a second caller inside the
-  // *same* tab could start generating before the first write landed. One
-  // in-flight promise per context makes concurrent getSalt() calls converge on a
-  // single salt instead of racing each other.
-  let inflight = null;
+  // One cache and one in-flight promise per storage key: concurrent getSalt()
+  // calls for the same origin converge on a single salt, and calls for two
+  // different origins never block or overwrite each other.
+  const cachedSalts = new Map();
+  const inflightSalts = new Map();
 
   function logDebug (...args) {
     try {
@@ -51,22 +60,26 @@
     return !!(chrome.storage && chrome.storage.local);
   }
 
-  function readSalt () {
+  function saltKey (scope) {
+    return scope ? STORAGE_KEY + ':' + scope : STORAGE_KEY;
+  }
+
+  function readSalt (key) {
     return new Promise((resolve, reject) => {
       try {
         if (!hasStorage()) {
           resolve(null);
           return;
         }
-        chrome.storage.local.get([STORAGE_KEY], result => {
+        chrome.storage.local.get([key], result => {
           const err = chrome.runtime?.lastError;
           if (err) {
             logDebug("read error", err);
             reject(err);
             return;
           }
-          logDebug("read", result?.[STORAGE_KEY]);
-          resolve(result?.[STORAGE_KEY] || null);
+          logDebug("read", result?.[key]);
+          resolve(result?.[key] || null);
         });
       } catch (e) {
         logDebug("read exception", e);
@@ -75,21 +88,21 @@
     });
   }
 
-  function writeSalt (salt) {
+  function writeSalt (key, salt) {
     return new Promise((resolve, reject) => {
       try {
         if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
           resolve();
           return;
         }
-        chrome.storage.local.set({ [STORAGE_KEY]: salt }, () => {
+        chrome.storage.local.set({ [key]: salt }, () => {
           const err = chrome.runtime?.lastError;
           if (err) {
             logDebug("write error", err);
             reject(err);
             return;
           }
-          logDebug("write success", salt);
+          logDebug("write success", key);
           resolve();
         });
       } catch (e) {
@@ -99,7 +112,7 @@
     });
   }
 
-  async function createSalt () {
+  async function createSalt (key) {
     const newSalt = randomHex128();
     try {
       // P1 (determinism contract): the old order cached the fresh salt *before*
@@ -107,72 +120,90 @@
       // for this page load but never reached storage, so the next load derived a
       // different seed for the same (origin, config) - exactly the instability
       // this extension promises not to have. Persist first, then cache.
-      await writeSalt(newSalt);
+      await writeSalt(key, newSalt);
     } catch (e) {
       logDebug("write failed; using in-memory salt only", e);
       // Storage unavailable: keep the value for this page load only. Every tab
       // in this state derives independently, which is strictly better than
       // deriving from no salt at all.
-      cachedSalt = newSalt;
-      return cachedSalt;
+      cachedSalts.set(key, newSalt);
+      return newSalt;
     }
 
     // Two tabs can race here: both read null, both generate a salt, and the
     // later write wins. Re-read after writing and adopt the stored value so
-    // every tab converges on one salt for the install (determinism contract).
+    // every tab converges on one salt per key (determinism contract).
+    let adopted = newSalt;
     try {
-      const confirmed = await readSalt();
-      cachedSalt = (confirmed && confirmed !== newSalt) ? confirmed : newSalt;
+      const confirmed = await readSalt(key);
       if (confirmed && confirmed !== newSalt) {
+        adopted = confirmed;
         logDebug("another tab won the salt race; adopting stored salt");
       }
     } catch (e) {
-      cachedSalt = newSalt;
+      // Keep the value we just wrote.
     }
-    logDebug("using salt", cachedSalt);
-    return cachedSalt;
+    cachedSalts.set(key, adopted);
+    logDebug("using salt", key);
+    return adopted;
   }
 
-  function getSalt () {
-    if (cachedSalt) return Promise.resolve(cachedSalt);
-    if (inflight) return inflight;
+  function getSalt (scope) {
+    const key = saltKey(scope);
+    if (cachedSalts.has(key)) return Promise.resolve(cachedSalts.get(key));
+    if (inflightSalts.has(key)) return inflightSalts.get(key);
 
-    inflight = (async () => {
+    const pending = (async () => {
       try {
-        const existing = await readSalt();
+        const existing = await readSalt(key);
         if (existing) {
-          cachedSalt = existing;
-          return cachedSalt;
+          cachedSalts.set(key, existing);
+          return existing;
         }
       } catch (e) {
         logDebug("read failed, generating new salt", e);
         // Ignore read errors, will generate a fresh salt
       }
-      return createSalt();
-    })().finally(() => { inflight = null; });
+      return createSalt(key);
+    })().finally(() => { inflightSalts.delete(key); });
 
-    return inflight;
+    inflightSalts.set(key, pending);
+    return pending;
   }
 
   // Cross-tab convergence (P0 1.5): the re-read in getSalt() closes the window
   // where two tabs race to create the first salt, but a tab that already cached
   // a value would keep it forever if another tab (or a rotation) replaced the
-  // stored one. Adopting storage changes keeps one salt per install, so the
+  // stored one. Adopting storage changes keeps one salt per origin, so the
   // "same (salt, origin, config) -> same values" contract holds across tabs.
+  //
+  // P0 (per-origin): this used to watch the single STORAGE_KEY only, so a
+  // rotation that removed "ss_salt:<origin>" left every open tab advertising
+  // the old salt until it was reloaded. Every key in the namespace is adopted
+  // (and a removed one is dropped) now.
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== "local" || !changes[STORAGE_KEY]) return;
-        const next = changes[STORAGE_KEY].newValue;
-        if (next && next !== cachedSalt) {
-          logDebug("stored salt changed; adopting", next);
-          cachedSalt = next;
-          // P2 7.1 (seed epoch): the salt is the root of every derived seed, so
-          // replacing it invalidates every value already handed to a hook. The
-          // epoch was defined but never advanced, so nothing could observe the
-          // swap. Bump it here, at the one place a new salt becomes live.
-          if (typeof globalThis.ssBumpSeedEpoch === 'function') globalThis.ssBumpSeedEpoch();
+        if (area !== "local") return;
+        let touched = false;
+        for (const key of Object.keys(changes)) {
+          if (key !== STORAGE_KEY && key.indexOf(STORAGE_KEY + ':') !== 0) continue;
+          const next = changes[key].newValue;
+          if (next) {
+            logDebug("stored salt changed; adopting", key);
+            cachedSalts.set(key, next);
+          } else {
+            // The key was removed (a rotation): forget it so the next read
+            // regenerates instead of serving the rotated-away value.
+            logDebug("stored salt removed", key);
+            cachedSalts.delete(key);
+          }
+          touched = true;
         }
+        // P2 7.1 (seed epoch): the salt is the root of every derived seed, so
+        // replacing it invalidates every value already handed to a hook. Bump
+        // the epoch at the one place a salt becomes live or goes away.
+        if (touched && typeof globalThis.ssBumpSeedEpoch === 'function') globalThis.ssBumpSeedEpoch();
       });
     }
   } catch (e) {

@@ -12,7 +12,8 @@
         "storage",
         "tabs",
         "alarms",
-        "notifications"
+        "notifications",
+        "browsingData"
     ],
     "background": {
         "service_worker": "background/service-worker.js"
@@ -43,6 +44,7 @@
                 "core/config-schema.js",
                 "core/config.js",
                 "core/hash.js",
+                "core/chrome-versions.js",
                 "core/prng.js",
                 "core/timing.js",
                 "core/stealth.js",

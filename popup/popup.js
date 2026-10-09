@@ -266,7 +266,13 @@ async function main () {
         rotated = !!(res && res.success);
       } catch (e) { /* fall through to the local path */ }
       if (!rotated) {
-        await storageRemove('ss_salt');
+        // Per-origin salts live under "ss_salt:<origin>", so removing the single
+        // legacy key would no longer rotate anything.
+        try {
+          const allSalts = await chrome.storage.local.get(null);
+          const saltKeys = Object.keys(allSalts || {}).filter((k) => k === 'ss_salt' || k.indexOf('ss_salt:') === 0);
+          if (saltKeys.length) await chrome.storage.local.remove(saltKeys);
+        } catch (e) { /* best effort */ }
         const rotation = (await storageGet(['ss_rotation_info'])).ss_rotation_info || {};
         await storageSet({ ss_rotation_info: { lastRotation: new Date().toISOString(), rotationCount: (rotation.rotationCount || 0) + 1 } });
       }

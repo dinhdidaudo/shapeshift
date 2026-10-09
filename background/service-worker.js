@@ -353,8 +353,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // Perform fingerprint rotation
 async function rotateFingerprintNow() {
   try {
-    // Generate new salt (removes old one, forcing regeneration)
-    await chrome.storage.local.remove('ss_salt');
+    // Generate new salt (removes the old ones, forcing regeneration). Salts are
+    // stored per origin ("ss_salt:<origin>"), so every salt key must go:
+    // removing only the legacy "ss_salt" would rotate nothing at all.
+    const allSalts = await chrome.storage.local.get(null);
+    const saltKeys = Object.keys(allSalts || {}).filter((k) => k === 'ss_salt' || k.indexOf('ss_salt:') === 0);
+    if (saltKeys.length) await chrome.storage.local.remove(saltKeys);
 
     // Feature 5.4: advance the generation so every already-stamped tab counts
     // as stale and is reloaded once it is next activated (see the salt guard
@@ -381,11 +385,50 @@ async function rotateFingerprintNow() {
     const cfgResult = await chrome.storage.local.get(['ssConfig']);
     const cfg = cfgResult.ssConfig || {};
 
+    // Anti-fraud §1 (session coherence): a rotation that changes every
+    // fingerprint surface but leaves the site's cookies and storage in place
+    // presents a brand-new device on an unchanged session - the classic
+    // session-hijacking pattern Cloudflare challenges. When the user opts in
+    // (clearSiteDataOnRotation), wipe the browsable data for the origins we
+    // protect so the new identity also gets a new session. This logs the user
+    // out of those sites, which is why it is off by default and warned about
+    // in the Options copy.
+    if (cfg.clearSiteDataOnRotation === true) {
+      try {
+        await chrome.browsingData.remove({
+          // `since: 0` clears everything, not just recent history: a cf_clearance
+          // cookie from months ago is exactly the token we need gone.
+          since: 0,
+          originTypes: { unprotectedWeb: true }
+        }, {
+          cookies: true,
+          localStorage: true,
+          indexedDB: true,
+          cacheStorage: true,
+          serviceWorkers: true,
+          cache: true
+        });
+      } catch (e) {
+        // browsingData can be unavailable on some builds; a failed wipe must
+        // not abort the rest of the rotation.
+        console.warn('[ShapeShift Rotation] Site-data wipe failed:', e);
+      }
+    }
+
     // Reload open http(s) tabs so they pick up the new identity. Only the pages
     // the extension actually protects are touched; chrome:// and other
     // privileged surfaces are left alone.
+    //
+    // Anti-fraud §1: the default scope is 'active' - only the focused tab of
+    // each window. Reloading every tab made a single rotation look like a
+    // hundred simultaneous device changes to every site the user had open, and
+    // the salt guard would have reloaded them again on next activation. Users
+    // who want the old behaviour can set rotationReloadScope to 'all'.
     if (cfg.reloadTabsOnRotation !== false) {
-      const tabs = await chrome.tabs.query({});
+      const reloadScope = cfg.rotationReloadScope === 'all' ? 'all' : 'active';
+      const tabs = reloadScope === 'all'
+        ? await chrome.tabs.query({})
+        : await chrome.tabs.query({ active: true });
       for (const tab of tabs) {
         if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
           try {
