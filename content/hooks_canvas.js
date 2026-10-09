@@ -18,10 +18,29 @@
     // a page could detect the shim by simply reading twice. Keying the noise on
     // (seed, byte index) keeps the value stable across reads while still varying
     // per origin and per pixel.
+    //
+    // P1 (hot loop): this concatenated a fresh string and re-folded the whole
+    // "<seed>:" prefix for every single byte - a 1920x1080 read meant ~8.3
+    // million concatenations and ~90 million character folds on the main thread.
+    // FNV-1a is a pure sequential fold, so the state after the constant prefix
+    // is computed once and only the index digits are folded per byte. The
+    // output is byte-identical to the old formula, so existing identities do
+    // not shift.
+    const prefixState = (function () {
+      const init = globalThis.ssFnvInit;
+      const upd = globalThis.ssFnvUpdate;
+      if (!init || !upd) return null;
+      return upd(init(), seed + ':');
+    })();
+
     function pixelNoise (index) {
-      const hash = globalThis.ssHashString;
-      if (!hash) return noise(noiseStrength);
-      const h = hash(seed + ':' + index);
+      const upd = globalThis.ssFnvUpdate;
+      if (!upd || prefixState === null) {
+        const hash = globalThis.ssHashString;
+        if (!hash) return noise(noiseStrength);
+        return (((hash(seed + ':' + index)) / 4294967296) - 0.5) * noiseStrength;
+      }
+      const h = upd(prefixState, index);
       return ((h / 4294967296) - 0.5) * noiseStrength;
     }
 
@@ -34,9 +53,34 @@
     }
 
     safeWrap(() => {
-      const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-      const origToBlob = HTMLCanvasElement.prototype.toBlob;
-      const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      // P1: this installer had no ssStealth guard at all, so a second install
+      // (or a second content-script run) re-wrapped every entry point and the
+      // page could count the wrappers. Guard both prototypes that get patched.
+      const canvasProto = HTMLCanvasElement.prototype;
+      const ctxProto = CanvasRenderingContext2D.prototype;
+      if (globalThis.ssStealth) {
+        if (globalThis.ssStealth.isPatched(canvasProto)) return;
+        globalThis.ssStealth.markPatched(canvasProto);
+        globalThis.ssStealth.markPatched(ctxProto);
+      }
+
+      const origToDataURL = canvasProto.toDataURL;
+      const origToBlob = canvasProto.toBlob;
+      const origGetImageData = ctxProto.getImageData;
+      const origGetContext = canvasProto.getContext;
+
+      // P1 (page-state hygiene): toDataURL()/toBlob() used to call
+      // this.getContext("2d") purely to read pixels back. On a canvas the page
+      // never used as 2d that CREATES a 2d context as a side effect of merely
+      // exporting, and on a canvas whose context was created with other
+      // attributes it logs a warning. Remember which canvases really do have a
+      // 2d context and only perturb those.
+      const twoDContexts = new WeakSet();
+      canvasProto.getContext = function (type) {
+        const ctx = origGetContext.apply(this, arguments);
+        if (ctx && type === '2d') twoDContexts.add(this);
+        return ctx;
+      };
 
       function noisedImageData (ctx, x, y, w, h) {
         // Track statistics
@@ -66,7 +110,7 @@
         return imgData;
       }
 
-      CanvasRenderingContext2D.prototype.getImageData = function (x, y, w, h) {
+      ctxProto.getImageData = function (x, y, w, h) {
         return noisedImageData(this, x, y, w, h);
       };
 
@@ -86,17 +130,17 @@
         return { original: original, noised: copy };
       }
 
-      HTMLCanvasElement.prototype.toDataURL = function () {
+      canvasProto.toDataURL = function () {
         let ctx = null;
         let snapshot = null;
         try {
           if (globalThis.ssStatsTracker) {
             globalThis.ssStatsTracker.increment('canvasReads');
           }
-          // Plain getContext: passing willReadFrequently here can silently
-          // switch an existing canvas to software rendering and warns when the
-          // canvas already has a 2d context created with other attributes.
-          ctx = this.getContext("2d");
+          // Only read back from a canvas that already has a 2d context; see
+          // the twoDContexts note above. Passing willReadFrequently here would
+          // also silently switch an existing canvas to software rendering.
+          if (twoDContexts.has(this)) ctx = origGetContext.call(this, '2d');
           if (ctx && origGetImageData) {
             snapshot = noisedCopyOf(ctx, this.width, this.height);
             ctx.putImageData(snapshot.noised, 0, 0);
@@ -111,7 +155,7 @@
         }
       };
 
-      HTMLCanvasElement.prototype.toBlob = function () {
+      canvasProto.toBlob = function () {
         const args = arguments;
         // P1: the pending 2d context and the pristine ImageData used to be
         // stashed on the canvas element itself as `__ssCtx` / `__ssSnapshot`.
@@ -132,7 +176,7 @@
           if (globalThis.ssStatsTracker) {
             globalThis.ssStatsTracker.increment('canvasReads');
           }
-          const ctx = this.getContext("2d");
+          const ctx = twoDContexts.has(this) ? origGetContext.call(this, '2d') : null;
           if (ctx && origGetImageData) {
             const snapshot = noisedCopyOf(ctx, this.width, this.height);
             pendingCtx = ctx;

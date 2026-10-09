@@ -129,9 +129,16 @@
           // Add subtle variations to the results.
           // Deterministic per configuration so two decodingInfo() calls for the
           // same input agree (10% of inputs flip).
+          //
+          // P1: `info` is the object the UA handed back and may be a cached or
+          // shared instance, so flipping a field on it leaked the change into
+          // every later caller (and into the page's own reads of the same
+          // configuration). Copy it first, exactly like the MAIN-world hook.
           if (stableRoll('power', JSON.stringify(configuration)) < 0.1 && info.powerEfficient !== undefined) {
-            info.powerEfficient = !info.powerEfficient;
+            const copy = Object.assign({}, info);
+            copy.powerEfficient = !copy.powerEfficient;
             log('[shapeshift][media] decodingInfo: Flipped powerEfficient');
+            return copy;
           }
 
           // Keep supported and smooth as-is to avoid breaking playback
@@ -182,6 +189,14 @@
       );
 
       if (!origSampleRate) return;
+
+      // P1 (double-patch): this getter had no ssStealth guard, so a second
+      // install (or a second content-script run) re-wrapped it and the page
+      // could count the wrappers. The getter reads through `origSampleRate`,
+      // captured above, so marking the ORIGINAL getter is what stops a re-wrap
+      // from stacking on top of this one.
+      if (globalThis.ssStealth && origSampleRate.get && globalThis.ssStealth.isPatched(origSampleRate.get)) return;
+      if (globalThis.ssStealth && origSampleRate.get) globalThis.ssStealth.markPatched(origSampleRate.get);
 
       try {
         Object.defineProperty(OrigAudioContext.prototype, 'sampleRate', {

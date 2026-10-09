@@ -143,8 +143,12 @@
     // Prevent navigator.webdriver detection (automation detection)
     safeWrap(() => {
       try {
-        // Always set webdriver to false/undefined
-        Object.defineProperty(navigator, 'webdriver', {
+        // Always set webdriver to false/undefined.
+        // P1 5.3 (own-property leak): define on Navigator.prototype, not the
+        // instance, so Object.getOwnPropertyNames(navigator) stays empty like
+        // a real Chrome. Matches page_world_injector.js.
+        const navTarget = Object.getPrototypeOf(navigator) || navigator;
+        Object.defineProperty(navTarget, 'webdriver', {
           get: function() {
             if (globalThis.ssTimingUtils) {
               globalThis.ssTimingUtils.randomDelaySync();

@@ -34,7 +34,14 @@
     // Hook navigator.maxTouchPoints
     safeWrap(() => {
       try {
-        Object.defineProperty(navigator, 'maxTouchPoints', {
+        // P1 5.3 (own-property leak): the accessor used to be defined on the
+        // navigator INSTANCE, so Object.getOwnPropertyNames(navigator) listed
+        // maxTouchPoints while real Chrome keeps every navigator field as an
+        // accessor on Navigator.prototype and its own property list is empty -
+        // a one-line detector. Patch the prototype instead, which is also what
+        // the MAIN world does for screen.orientation.
+        const navProto = Object.getPrototypeOf(navigator) || navigator;
+        Object.defineProperty(navProto, 'maxTouchPoints', {
           get: function() {
             // Track statistics
             if (globalThis.ssStatsTracker) {
@@ -140,19 +147,60 @@
               return result.matches;
             }
 
+            // P2 4.4 (listener oracle): addEventListener was forwarded to the
+            // REAL MediaQueryList, so a handler fired with `event.target` and
+            // `this` equal to the real list - reading `e.target.matches` there
+            // returned the un-spoofed value and defeated the whole shim. Each
+            // callback is wrapped so the event it observes carries this proxy as
+            // target/currentTarget and the spoofed `matches`; removal is mapped
+            // back to the original reference so removeEventListener still works.
+            const listenerMap = new WeakMap();
+            let proxy = null;
+
+            const wrapListener = (listener) => {
+              if (typeof listener !== 'function') return listener;
+              let wrapped = listenerMap.get(listener);
+              if (wrapped) return wrapped;
+              wrapped = function (event) {
+                let seen = event;
+                try {
+                  seen = new Proxy(event, {
+                    get (t, prop) {
+                      if (prop === 'target' || prop === 'currentTarget') return proxy;
+                      if (prop === 'matches') return spoofedMatches();
+                      const v = t[prop];
+                      return typeof v === 'function' ? v.bind(t) : v;
+                    }
+                  });
+                } catch (err) { seen = event; }
+                return listener.call(proxy, seen);
+              };
+              listenerMap.set(listener, wrapped);
+              return wrapped;
+            };
+
             const handler = {
               get(target, prop) {
                 if (prop === 'matches') return spoofedMatches();
+                if (prop === 'addEventListener' || prop === 'addListener') {
+                  return function (listener, rest) {
+                    return target[prop](wrapListener(listener), rest);
+                  };
+                }
+                if (prop === 'removeEventListener' || prop === 'removeListener') {
+                  return function (listener, rest) {
+                    return target[prop](listenerMap.get(listener) || listener, rest);
+                  };
+                }
                 const value = target[prop];
                 if (typeof value === 'function') return value.bind(target);
                 return value;
               }
             };
 
-            const proxy = new Proxy(result, handler);
-            // The Proxy forwards listener registration to the real object, whose
-            // `matches` is the un-spoofed one. Force the initial value so a
-            // listener that fires immediately observes the spoofed state.
+            proxy = new Proxy(result, handler);
+            // Force the initial value so a listener that fires immediately
+            // observes the spoofed state even before the get trap runs.
             try {
               Object.defineProperty(proxy, 'matches', { value: spoofedMatches(), configurable: true });
             } catch (e) { /* non-extensible MediaQueryList; the get trap still wins */ }

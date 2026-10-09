@@ -81,9 +81,9 @@
         <div class="card">
           <div class="card-head"><h3>Quick presets</h3><span class="muted">One click, tuned profiles</span></div>
           <div class="preset-row">
+            <button class="preset" data-preset="light" type="button"><strong>Light</strong><span>Minimal noise for fragile apps</span></button>
             <button class="preset" data-preset="balanced" type="button"><strong>Balanced</strong><span>Everyday privacy, nothing breaks</span></button>
-            <button class="preset" data-preset="strict" type="button"><strong>Strict</strong><span>Maximum divergence, some sites may misbehave</span></button>
-            <button class="preset" data-preset="compat" type="button"><strong>Compatibility</strong><span>Minimal noise for fragile apps</span></button>
+            <button class="preset" data-preset="maximum" type="button"><strong>Maximum</strong><span>Maximum divergence, some sites may misbehave</span></button>
           </div>
         </div>
       </section>
@@ -139,6 +139,14 @@
           <div id="diagnosticsBody" class="rows"></div>
           <div class="site-add">
             <button class="btn ghost" id="refreshDiagnosticsBtn" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Live self-test</h3><span class="muted">Sample every surface on the active tab</span></div>
+          <p class="muted card-note">Runs the fingerprint sampler in the active tab and reports a digest per surface. Surfaces the tab cannot reach are listed instead of being folded into a hash.</p>
+          <div id="selfTestBody" class="rows"></div>
+          <div class="site-add">
+            <button class="btn ghost" id="runSelfTestBtn" type="button">Run self-test</button>
           </div>
         </div>
         <div class="card">

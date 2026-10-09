@@ -14,6 +14,12 @@
   // again in case its first READY was posted before this listener existed.
   // -------------------------------------------------------------------------
   let ssPageNonce = null;
+  // Waiters are resolved by the listener instead of being polled: a 5 ms
+  // interval timer ran for the whole (up to 500 ms) window on every page load,
+  // and the retry loop below multiplied that by four. That burned CPU for no
+  // reason and left a 5 ms timer pattern on the page, which is itself a
+  // recognisable extension signal. Resolve on arrival instead.
+  let nonceWaiters = [];
 
   window.addEventListener('message', function (event) {
     if (event.source !== window) return;
@@ -22,21 +28,30 @@
     if (event.data.protocol !== 1) return;
     if (typeof event.data.nonce !== 'string' || !event.data.nonce) return;
     ssPageNonce = event.data.nonce;
+    const waiters = nonceWaiters;
+    nonceWaiters = [];
+    waiters.forEach(function (resolve) { resolve(ssPageNonce); });
   });
 
   // Resolves with the nonce, or null when the injector never offered one (for
   // example when its crypto.getRandomValues was unavailable and it therefore
   // does not require a nonce at all).
   function waitForPageNonce (timeoutMs) {
+    if (ssPageNonce) return Promise.resolve(ssPageNonce);
     return new Promise(function (resolve) {
-      let waited = 0;
-      const step = 5;
+      let settled = false;
+      const entry = function (value) {
+        if (settled) return;
+        settled = true;
+        const i = nonceWaiters.indexOf(entry);
+        if (i !== -1) nonceWaiters.splice(i, 1);
+        resolve(value);
+      };
+      nonceWaiters.push(entry);
+      // Ask the injector to re-announce; it answers every HELLO with READY, so
+      // whichever side started first, the nonce arrives without polling.
       window.postMessage({ type: 'SS_PAGE_WORLD_HELLO', protocol: 1 }, location.origin);
-      (function poll () {
-        if (ssPageNonce || waited >= timeoutMs) return resolve(ssPageNonce);
-        waited += step;
-        setTimeout(poll, step);
-      })();
+      setTimeout(function () { entry(ssPageNonce); }, timeoutMs);
     });
   }
 
@@ -112,7 +127,12 @@
           return mean + stddev * value;
         }
 
-        const u1 = prng();
+        // P1: prng() can legitimately return exactly 0, and Math.log(0) is
+        // -Infinity, which made radius Infinity and poisoned the sample (and the
+        // spare) with NaN/Infinity. Clamp to the smallest positive double so the
+        // transform stays finite; the probability of hitting it is ~2^-32.
+        let u1 = prng();
+        if (!(u1 > 0)) u1 = Number.MIN_VALUE;
         const u2 = prng();
         const radius = Math.sqrt(-2 * Math.log(u1));
         const theta = 2 * Math.PI * u2;

@@ -6,7 +6,7 @@ files Chrome runs.
 
 ## Prerequisites
 
-- Node.js >= 18.0.0 (used only for the scripts in `scripts/`)
+- Node.js >= 20.0.0 (used only for the scripts in `scripts/`)
 - pnpm >= 9.0.0 (only to run the script shortcuts)
 
 There is nothing to `pnpm install`. Every script uses only the Node standard
@@ -20,6 +20,7 @@ library.
 | `pnpm run lint` | The same gate in lint mode. |
 | `pnpm test` | Runs the structural gate **and** the core unit tests. |
 | `pnpm run build` | Runs the gate, then copies the runtime tree to `dist/`. |
+| `pnpm run bench` | Measures the canvas/audio noise hot path (no build output). |
 | `pnpm run icons` | Regenerates `images/icon*.png` (pure Node, no image libraries). |
 | `pnpm run migrate` | One-shot `fp*` -> `ss*` namespace migration. Idempotent. |
 

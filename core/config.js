@@ -112,6 +112,13 @@
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes.ssConfig) return;
+      // P2 7.1 (seed epoch): the epoch is the single observer of "the
+      // derivation inputs moved". It was defined in core/hash.js but never
+      // bumped anywhere, so a hook that recorded the epoch it derived under
+      // would have waited forever. A config edit changes which surfaces are on
+      // and with what magnitude, so it must advance the epoch before the new
+      // config is published.
+      if (typeof globalThis.ssBumpSeedEpoch === 'function') globalThis.ssBumpSeedEpoch();
       globalThis.ssLoadConfig().catch(() => {});
       // Feature 5.2: mirror the new config into chrome.storage.sync so another
       // signed-in browser picks the same settings up. Only the config travels;
@@ -137,7 +144,16 @@
         if (!synced || !synced.ssConfig) return;
         chrome.storage.local.get(['ssConfig'], function (local) {
           if (local && local.ssConfig) return;
-          chrome.storage.local.set({ ssConfig: synced.ssConfig }, function () {
+          // P1: the adopted object used to be written verbatim. A config that
+          // came from an older build (or a hand-edited sync store) then kept its
+          // old schema version and flat legacy keys, so the very next
+          // ssLoadConfig() call had to repair it - and any hook that read the
+          // raw store in between saw un-normalized values. Run it through the
+          // same normalize+migrate path the local read uses, and stamp the
+          // current schema version before it is persisted.
+          const adopted = globalThis.ssNormalizeConfig(synced.ssConfig);
+          adopted.ssConfigVersion = CONFIG_VERSION;
+          chrome.storage.local.set({ ssConfig: adopted }, function () {
             if (chrome.runtime && chrome.runtime.lastError) { /* ignore */ }
           });
         });

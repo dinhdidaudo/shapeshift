@@ -1,8 +1,14 @@
 // One-shot migration: rebrand the inherited engine namespace fp*/fp_* -> ss*/ss_*.
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+// ROOT must come from fileURLToPath, not from `URL.pathname`: the pathname is
+// percent-encoded, so a checkout under a path with a space ("C:/Users/My
+// Name/...") yields a directory no fs call can open, and on Windows it also
+// keeps the leading slash (`/D:/Dev/...`). fileURLToPath decodes and normalises
+// it for the host platform. verify.mjs pins this form across scripts/.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'scripts', 'artifacts']);
 const EXTS = new Set(['.js', '.ts', '.html', '.css', '.json', '.md']);
 

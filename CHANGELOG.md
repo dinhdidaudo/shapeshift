@@ -62,6 +62,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent stream from `(salt, origin, surfaceId)`, so toggling one module no
   longer shifts another module's reported values.
 
+### Added
+
+- **Keyboard layout protection (P2 7.3)** — `navigator.keyboard.getLayoutMap()`
+  used to resolve to the HOST keyboard layout, so a German QWERTZ keyboard behind
+  an en-US user agent was a one-line contradiction. The layout is now chosen from
+  the same per-origin seed as every other persona, and the resolved object stays a
+  real `KeyboardLayoutMap` (a `Proxy` over the native result, prototype preserved)
+  so `instanceof` and every `Map` method keep working.
+- **Viewport ownership (P2 7.3)** — `visualViewport` was left fully native, so a
+  page could read the untouched accessors as an owner/patch-state oracle. The
+  accessors are re-asserted on `VisualViewport.prototype` with the REAL values,
+  because rewriting the viewport breaks every scroll-driven layout.
+- **Hot-path benchmark (`pnpm run bench`)** — `scripts/bench.mjs` measures the
+  canvas/audio noise loop and fails when the carried-prefix FNV-1a state is no
+  longer faster than rebuilding the string per sample. CI runs it alongside the
+  other gates so a slow-but-correct rewrite cannot land unnoticed.
+
 ### Changed
 
 - `web_accessible_resources` is now empty, and the page-world self-test helper

@@ -22,7 +22,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: ['18', '20']
+        # Node 18 reached end of life in April 2025. The gate uses
+        # `readdirSync`/`structuredClone`-era APIs and the `--check` flag, all
+        # of which are stable on 20 and 22; testing the LTS pair keeps the
+        # matrix meaningful without certifying an unsupported runtime.
+        node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
 
@@ -33,22 +37,42 @@ jobs:
 
       # No dependencies to install: the extension is plain JS with no bundler
       # and no lockfile, so the checkout is directly runnable.
-      - name: Structural verification
-        run: node scripts/verify.mjs
-
-      - name: Lint rules
+      #
+      # `--lint` already runs every structural check and then adds the lint
+      # rules, so a second plain run only duplicated the whole gate's output.
+      - name: Structural verification + lint rules
         run: node scripts/verify.mjs --lint
 
       - name: Unit tests
         run: node scripts/test.mjs
 
+      # The canvas/audio hot path is the only place where a correct but slow
+      # rewrite would still pass every other check. Run the benchmark so a
+      # regression to per-sample string building fails the build.
+      - name: Hot-path benchmark
+        run: node scripts/bench.mjs
+
       - name: Build package
         run: node scripts/build.mjs
+
+      # The icons are generated from scripts/brand-spec.mjs. Nothing compared
+      # the committed PNGs against that spec, so a brand change could land with
+      # stale icons and every other check would still pass. Regenerate, then
+      # fail if the tree changed.
+      - name: Icons match the brand spec
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        run: |
+          node scripts/generate-icons.mjs
+          git diff --exit-code -- images
 
       - name: Upload dist
         if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
         uses: actions/upload-artifact@v4
         with:
           name: shapeshift-dist
-          path: dist/
+          # `dist/` (with the trailing slash) uploads the *contents* of the
+          # folder, so the artifact arrived as a loose core/content/... tree
+          # with no dist/ root and could not be dropped onto chrome://extensions
+          # as an unpacked extension. `dist` uploads the directory itself.
+          path: dist
           if-no-files-found: error

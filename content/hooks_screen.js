@@ -5,6 +5,12 @@
 
   installers.push(function installScreenHooks (env) {
     if (!env || !env.config?.enableScreenProtection) return;
+    // P1 (double-patch): canvas, fonts, webgl, navigator and media all guard
+    // their install against a second wrap; this installer did not, so a second
+    // content-script run re-wrapped every screen getter and the page could
+    // count the wrappers. Guard on the object whose prototype gets patched.
+    if (globalThis.ssStealth && globalThis.ssStealth.isPatched(window.screen)) return;
+    if (globalThis.ssStealth) globalThis.ssStealth.markPatched(window.screen);
     // P1: every draw below used the streaming PRNG, so the advertised screen
     // changed on each load of the same origin and disagreed with the MAIN
     // world. Key each pick on (seed, field) so it is stable per origin.
@@ -124,9 +130,18 @@
         }
       }
 
+      // P1 (own-property leak): the getters below used to be defined ON the
+      // screen instance, so Object.getOwnPropertyNames(screen) returned
+      // width/height/availWidth/availHeight/colorDepth/pixelDepth while a real
+      // Chrome screen carries all of them as accessors on Screen.prototype and
+      // its own property list is empty - a one-line detector. Patch the
+      // prototype, exactly like the MAIN world re-asserts screen.orientation
+      // on the Orientation constructor prototype.
+      const screenTarget = Object.getPrototypeOf(window.screen) || window.screen;
+
       // Screen width and height
-      defineGetter(window.screen, 'width', () => spoofedResolution.width);
-      defineGetter(window.screen, 'height', () => spoofedResolution.height);
+      defineGetter(screenTarget, 'width', () => spoofedResolution.width);
+      defineGetter(screenTarget, 'height', () => spoofedResolution.height);
 
       // P1 2.10: availHeight used to be height - 40 on every platform, which is
       // wrong on macOS (no taskbar: availHeight === height) and wrong whenever
@@ -140,12 +155,12 @@
       const availOffset = realGap > 0
         ? Math.max(1, Math.round(realGap * (spoofedResolution.height / (baseHeight || spoofedResolution.height))))
         : 0;
-      defineGetter(window.screen, 'availWidth', () => spoofedResolution.width);
-      defineGetter(window.screen, 'availHeight', () => spoofedResolution.height - availOffset);
+      defineGetter(screenTarget, 'availWidth', () => spoofedResolution.width);
+      defineGetter(screenTarget, 'availHeight', () => spoofedResolution.height - availOffset);
 
       // Color depth and pixel depth
-      defineGetter(window.screen, 'colorDepth', () => spoofedColorDepth);
-      defineGetter(window.screen, 'pixelDepth', () => spoofedColorDepth);
+      defineGetter(screenTarget, 'colorDepth', () => spoofedColorDepth);
+      defineGetter(screenTarget, 'pixelDepth', () => spoofedColorDepth);
 
       // Device pixel ratio
       defineGetter(window, 'devicePixelRatio', () => spoofedPixelRatio);
@@ -153,7 +168,10 @@
       // Screen orientation (if exists)
       if (window.screen.orientation) {
         const origOrientation = window.screen.orientation.type;
-        defineGetter(window.screen.orientation, 'type', () => {
+        // Same own-property argument as the Screen getters above: type
+        // belongs on ScreenOrientation.prototype.
+        const orientationTarget = Object.getPrototypeOf(window.screen.orientation) || window.screen.orientation;
+        defineGetter(orientationTarget, 'type', () => {
           // Keep original orientation but add consistency
           return origOrientation;
         });

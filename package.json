@@ -16,11 +16,12 @@
     "lint": "node scripts/verify.mjs --lint",
     "test": "node scripts/verify.mjs && node scripts/test.mjs",
     "build": "node scripts/build.mjs",
+    "bench": "node scripts/bench.mjs",
     "icons": "node scripts/generate-icons.mjs",
     "migrate": "node scripts/rename-namespace.mjs"
   },
   "engines": {
-    "node": ">=18.0.0",
+    "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
   }
 }

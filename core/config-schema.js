@@ -13,12 +13,26 @@
     debug: false,
     enableCanvasNoise: true, canvasNoiseStrength: 2,
     enableWebGLMasking: true, webglJitter: 2, maskWebGLVendorStrings: true, shuffleWebGLExtensions: true,
+    // P2 7.3: navigator.gpu was completely unprotected, so a page could read
+    // the real GPU out of GPUAdapter.info while WebGL reported a persona.
+    enableWebGPUProtection: true,
+    // P2 7.3: navigator.keyboard.getLayoutMap() resolved to the HOST keyboard
+    // layout, a locale tell nothing else covered - a German layout behind an
+    // en-US user agent is a one-line contradiction.
+    enableKeyboardProtection: true,
     enableAudioNoise: true, audioNoiseStrength: 1e-7,
     enableNavigatorFuzz: true,
     navigator: { fuzzHardwareConcurrency: true, fuzzDeviceMemory: true, shuffleLanguages: true },
     perOriginFingerprint: true,
     enableWebRTCProtection: true,
-    webrtc: { blockIPLeak: true, randomizeSDP: true, forceRelay: false },
+    // P2 7.2: one explicit tri-state replaces the three overlapping WebRTC
+    // booleans. `off` leaves the session description untouched,
+    // `block-host-srflx` strips the candidates that carry a local or public
+    // address, and `relay-only` additionally forces iceTransportPolicy so no
+    // host candidate is gathered at all. The legacy booleans stay declared so a
+    // stored config from an older build keeps working: both worlds derive the
+    // same effective mode from them when `mode` is absent.
+    webrtc: { mode: 'block-host-srflx', blockIPLeak: true, randomizeSDP: true, forceRelay: false },
     enableMediaDeviceProtection: true,
     mediaDevices: { randomizeDeviceIds: true, spoofDeviceLabels: true },
     enableScreenProtection: true,
@@ -38,6 +52,12 @@
     // `undefined` and the switch silently did nothing. Declare it once here.
     timingJitter: 0,
     useStrongKDF: true, kdfIterations: 1000, useGaussianNoise: true,
+    // P2 7.4 (persona profile): the coherent OS family used to be derivable
+    // only from the seed, so a user could not ask for a specific one. 'auto'
+    // keeps the derived pick; the three explicit values pin the family in BOTH
+    // worlds, which is what makes the UA platform, the WebGL renderer, the
+    // WebGPU adapter and the keyboard layout agree by construction.
+    persona: 'auto',
     autoRotateFingerprint: false, rotationIntervalHours: 24, rotateOnStartup: false,
     // Security §3: rotation used to reload every open tab and raise an OS
     // notification with no way to opt out. Both are now explicit switches so
@@ -53,6 +73,7 @@
     fuzzDeviceMemory: ['navigator', 'fuzzDeviceMemory'],
     shuffleLanguages: ['navigator', 'shuffleLanguages'],
     blockIPLeak: ['webrtc', 'blockIPLeak'],
+    webrtcMode: ['webrtc', 'mode'],
     randomizeSDP: ['webrtc', 'randomizeSDP'],
     forceRelay: ['webrtc', 'forceRelay'],
     randomizeDeviceIds: ['mediaDevices', 'randomizeDeviceIds'],

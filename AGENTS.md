@@ -36,7 +36,7 @@ scripts/                      Node utilities (verify, build, icons, migration)
 
 1. **Original work only.** Do not add copied code, attribution, or references to any third-party project, and do not introduce a `refers/` directory.
 2. **Namespace is `ss` / `ss`-prefixed.** The retired `fp`-prefixed namespace must not come back. New globals, storage keys, and message types must use the `ss` prefix.
-   - Storage keys: `ssConfig`, `ss_salt`, `ss_stats`, `ss_site_settings`, `ss_rotation_info`
+   - Storage keys: `ssConfig`, `ss_salt`, `ss_stats`, `ss_site_settings`, `ss_rotation_info`, `ss_diagnostics`
    - Globals: `ssConfig`, `ssPRNG`, `ssNoise`, `ssEnv`, `ssReady`, `ssStealth`, ...
    - Messages: `SS_STATS`, `SS_INIT_PAGE_HOOKS`
 3. **No network calls, ever.** The extension is fully offline and collects nothing. Do not add `fetch`/`XMLHttpRequest`/analytics to runtime code.
@@ -72,6 +72,7 @@ The UI is intentionally opinionated: deep-space glass, aurora accents, Inter for
 | `ss_stats` | counters, e.g. `totalCanvasReads`, `sitesProtected` | `stats_tracker.js` / service worker |
 | `ss_site_settings` | `{ "<origin>": { enabled: boolean, reason?: string } }` | popup + options |
 | `ss_rotation_info` | `{ lastRotation: ISO, rotationCount: number }` | service worker |
+| `ss_diagnostics` | `{ failedInstallers, totalInstallers, lastFailureAt, lastFailureOrigin }` (storage.session) | `background/service-worker.js` |
 
 Absence of an origin in `ss_site_settings` means **protection is ON** for that origin. A pause is recorded explicitly as `{ enabled: false }`.
 

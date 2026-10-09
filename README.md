@@ -26,16 +26,19 @@ Built from the ground up with a premium control-room interface: deep-space glass
 |-----|-------------------|
 | Canvas | Pixel-level Gaussian noise, including `OffscreenCanvas` |
 | WebGL | Parameter jittering, vendor masking, extension shuffling |
+| WebGPU | `GPUAdapter.info` reports the same GPU persona WebGL reports |
 | Audio | `AudioBuffer` sample noise and `AnalyserNode` frequency noise |
 | Fonts | Measurement randomization and `FontFaceSet.check` permutation |
 | Screen | Resolution spoofing plus `availLeft` / `availTop` / color depth |
 | Navigator | Hardware concurrency, memory, plugins and mime types |
 | Timezone | IANA zone switching with identical UTC offset |
-| WebRTC | SDP scrubbing, host candidate removal, device enumeration masking |
+| WebRTC | Tri-state policy (`block-host-srflx` / `relay-only` / `off`), candidate filtering, device enumeration masking |
 | Sensors | Battery, network and `KeyboardEvent.getModifierState` shaping |
 | Touch | Contact geometry jitter |
 | Media | Device enumeration masking, `MediaSource` / `MediaRecorder` codec upgrade-only |
 | Geolocation | Coarse coordinate perturbation |
+| Keyboard | `navigator.keyboard.getLayoutMap()` reports a layout that matches the UA persona |
+| Viewport | `visualViewport` accessors re-asserted on the prototype, real values preserved |
 | Detection | Headless signal suppression, storage quota normalization, `document.hidden` / `visibilityState` ownership, `Function.prototype.toString` guard |
 
 ## Installation
@@ -81,9 +84,9 @@ Built from the ground up with a premium control-room interface: deep-space glass
 
 ### Presets
 
+- **Light** — minimal noise for fragile applications
 - **Balanced** — everyday privacy, nothing breaks
-- **Strict** — maximum divergence, some sites may misbehave
-- **Compatibility** — minimal noise for fragile applications
+- **Maximum** — maximum divergence, some sites may misbehave
 
 ## How it works
 
@@ -168,7 +171,6 @@ Run the snippet twice — the values must be identical both times and different 
 ## Limitations
 
 - Cannot modify HTTP headers (User-Agent, Accept-Language)
-- Does not protect against CSS-only fingerprinting
 - Does not defeat WebGL shader fingerprinting
 - Timezone spoofing affects JavaScript only, not the system clock
 

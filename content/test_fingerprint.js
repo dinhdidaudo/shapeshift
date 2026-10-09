@@ -27,7 +27,7 @@
     ctx.fillStyle = "#069";
     ctx.fillRect(2, 2, 29, 29);
     ctx.fillStyle = "#fff";
-    ctx.fillText("fp", 4, 16);
+    ctx.fillText("ss", 4, 16);
     return canvas.toDataURL();
   }
 
@@ -74,7 +74,23 @@
     };
   }
 
-  async function testFingerprint () {
+  // Feature 7.3: a surface is only really covered when the sampler reached it.
+  // Hashing the literal string "no-webgl" produced a perfectly plausible digest,
+  // so the self-test reported success on a tab where nothing had been shaped.
+  // Name the reason instead of burying it in a hash.
+  const UNAVAILABLE = {
+    'noctx': 'Canvas 2D context is not available in this tab',
+    'canvas-error': 'The canvas sampler threw',
+    'no-webgl': 'WebGL is not available in this tab',
+    'webgl-error': 'The WebGL sampler threw',
+    'no-audio': 'Web Audio is not available in this tab',
+    'audio-error': 'The audio sampler threw',
+    'nav-error': 'The navigator sampler threw'
+  };
+
+  // Structured form used by the Options self-test: the composite digest plus the
+  // per-surface digests and the list of surfaces the sampler could not reach.
+  async function testFingerprintReport () {
     const canvas = safe(sampleCanvas, "canvas-error");
     const webgl = safe(sampleWebGL, "webgl-error");
     const audio = safe(sampleAudio, "audio-error");
@@ -89,8 +105,23 @@
       navigator: toHex(hash(JSON.stringify(nav)))
     };
 
-    return `C${parts.canvas}W${parts.webgl}A${parts.audio}N${parts.navigator}`;
+    const warnings = [];
+    [canvas, webgl, audio, nav].forEach(function (sample) {
+      if (typeof sample === 'string' && UNAVAILABLE[sample]) warnings.push(UNAVAILABLE[sample]);
+    });
+
+    return {
+      composite: `C${parts.canvas}W${parts.webgl}A${parts.audio}N${parts.navigator}`,
+      parts: parts,
+      warnings: warnings
+    };
+  }
+
+  async function testFingerprint () {
+    const report = await testFingerprintReport();
+    return report.composite;
   }
 
   globalThis.ssTestFingerprint = testFingerprint;
+  globalThis.ssTestFingerprintReport = testFingerprintReport;
 })();

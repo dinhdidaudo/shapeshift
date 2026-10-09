@@ -9,6 +9,8 @@ const DEFAULTS = globalThis.ssFlatDefaults || {};
 const MODULES = [
   { key: 'enableCanvasNoise', label: 'Canvas', icon: 'M3 3h18v18H3zM3 9h18M9 21V9' },
   { key: 'enableWebGLMasking', label: 'WebGL', icon: 'M12 2 3 7v10l9 5 9-5V7l-9-5Z' },
+  { key: 'enableWebGPUProtection', label: 'WebGPU', icon: 'M4 7h16v10H4zM9 12h6M12 9v6' },
+  { key: 'enableKeyboardProtection', label: 'Keyboard', icon: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10' },
   { key: 'enableAudioNoise', label: 'Audio', icon: 'M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2' },
   { key: 'enableWebRTCProtection', label: 'WebRTC', icon: 'M4 5h16v14H4zM9 12h6M12 9v6' },
   { key: 'enableScreenProtection', label: 'Screen', icon: 'M3 4h18v12H3zM8 20h8M12 16v4' },

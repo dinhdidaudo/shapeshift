@@ -27,9 +27,12 @@
   // useful while cutting the wakeups by ~7x; beforeunload still flushes.
   const FLUSH_INTERVAL = 15000;
 
-  // Increment a statistic counter
+  // Increment a statistic counter.
+  // P1: `localStats.hasOwnProperty(...)` breaks when the object has no
+  // prototype (or when a page shadows the method); the call form is the one
+  // that is safe on every object.
   function increment(category) {
-    if (localStats.hasOwnProperty(category)) {
+    if (Object.prototype.hasOwnProperty.call(localStats, category)) {
       localStats[category]++;
       scheduleFlush();
     }
@@ -59,27 +62,35 @@
     const hasUpdates = Object.values(localStats).some(count => count > 0);
     if (!hasUpdates) return;
 
-    // Create a copy of current stats
+    // Create a copy of current stats. The counters are NOT zeroed yet: the old
+    // order reset them before sendMessage, so a rejected send (service worker
+    // restarting, extension reloading) silently discarded the whole batch.
     const statsToSend = { ...localStats };
-
-    // Reset local counters
-    Object.keys(localStats).forEach(key => {
-      localStats[key] = 0;
-    });
+    const clearCounters = () => {
+      Object.keys(statsToSend).forEach(key => {
+        if (localStats[key] === statsToSend[key]) localStats[key] = 0;
+      });
+    };
 
     // Send to background
     try {
-      chrome.runtime.sendMessage({
+      const sent = chrome.runtime.sendMessage({
         type: 'UPDATE_STATS',
         data: statsToSend
-      }).catch(error => {
-        // Extension context might be invalid, ignore
-        if (globalThis.ssConfig?.debug) {
-          console.warn('[shapeshift][stats] Failed to send stats:', error);
-        }
       });
+      if (sent && typeof sent.then === 'function') {
+        sent.then(clearCounters).catch(error => {
+          // Keep the counters so the next flush retries them.
+          if (globalThis.ssConfig?.debug) {
+            console.warn('[shapeshift][stats] Failed to send stats:', error);
+          }
+        });
+      } else {
+        // Callback-style API with no promise: assume delivery.
+        clearCounters();
+      }
     } catch (error) {
-      // Ignore errors (extension might be reloading)
+      // Keep the counters; the extension context may just be reloading.
       if (globalThis.ssConfig?.debug) {
         console.warn('[shapeshift][stats] Failed to send stats:', error);
       }
@@ -95,6 +106,21 @@
   });
   window.addEventListener('pagehide', () => {
     flushStats();
+  });
+
+  // P2 (§7.1): the MAIN world cannot call ssStatsTracker directly - it is a
+  // different world with its own global object - so page_world_injector.js
+  // reports its reads as SS_STAT window messages. Fold them into the same
+  // counters the ISOLATED hooks use, so a canvas read performed by a page
+  // script that only ever touches the MAIN-world patched prototype is still
+  // counted. Only the fixed category label crosses the boundary, and it is
+  // validated against localStats before it is applied.
+  window.addEventListener('message', function (event) {
+    if (event.source !== window) return;
+    if (event.origin !== location.origin) return;
+    const data = event.data;
+    if (!data || data.type !== 'SS_STAT' || data.protocol !== 1) return;
+    increment(data.category);
   });
 
   // Export to global scope

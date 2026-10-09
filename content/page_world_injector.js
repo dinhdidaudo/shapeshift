@@ -13,15 +13,27 @@
   // FNV-1a hash, identical to core/hash.js. MAIN world does not load the core
   // files, so the same derivation is inlined here to keep per-surface noise
   // stable across reads and consistent with the ISOLATED hooks.
-  function hashString(str) {
-    let h1 = 0x811C9DC5;
-    const s = String(str);
+  //
+  // P1 (hot loop): `fnvUpdate` is exported inside this IIFE for the same reason
+  // core/hash.js exports it - FNV-1a is a pure sequential fold, so a caller that
+  // repeats a constant prefix (canvas byte noise) can fold the prefix once and
+  // only fold the varying digits afterwards. That is byte-identical to hashing
+  // the full string from scratch, and it removes the per-byte string build that
+  // used to dominate a 1920x1080 getImageData() in the page's own thread.
+  const FNV_OFFSET = 0x811C9DC5;
+  const FNV_PRIME = 0x01000193;
+  function fnvUpdate(state, value) {
+    let h = state >>> 0;
+    const s = String(value);
     for (let i = 0; i < s.length; i++) {
-      h1 ^= s.charCodeAt(i);
-      h1 = Math.imul(h1, 0x01000193);
-      h1 >>>= 0;
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, FNV_PRIME);
+      h >>>= 0;
     }
-    return h1 >>> 0;
+    return h >>> 0;
+  }
+  function hashString(str) {
+    return fnvUpdate(FNV_OFFSET, str);
   }
 
   // -------------------------------------------------------------------------
@@ -46,6 +58,13 @@
     kdfIterations: [1, 100000],
     rotationIntervalHours: [0.5, 8760]
   };
+  // P2 7.4 (persona profile): the only top-level STRING key in the config.
+  // `sanitizeConfig` used to copy booleans and bounded numbers only, so a
+  // `persona` value would never have reached the hooks even though the schema
+  // declared it. Whitelist the four known values here, exactly like
+  // WEBRTC_MODES does for the nested webrtc enum, so a forged message cannot
+  // inject an arbitrary string into the persona picker.
+  const PERSONA_MODES = ['auto', 'windows', 'mac', 'linux'];
   const CONFIG_BOOLEAN_KEYS = [
     'debug', 'enableCanvasNoise', 'enableWebGLMasking', 'maskWebGLVendorStrings',
     'shuffleWebGLExtensions', 'enableAudioNoise', 'enableNavigatorFuzz',
@@ -53,12 +72,28 @@
     'enableScreenProtection', 'enableFontProtection', 'enableTimezoneProtection',
     'enableSensorProtection', 'enableTouchProtection', 'enableUserAgentProtection',
     'enableMediaProtection', 'enableGeolocationProtection', 'enableDetectionResistance',
+    'enableWebGPUProtection', 'enableKeyboardProtection',
     'useStrongKDF', 'useGaussianNoise', 'autoRotateFingerprint', 'rotateOnStartup'
   ];
   // P1 2.14: the group loop used to copy every boolean/number key it found, so
   // a forged `screen: { foo: 1e9 }` (or `geolocation: { noiseLevel: 1e9 }`)
   // reached the hooks unclamped. Groups are now whitelisted per key exactly
   // like the top-level scalars: booleans by name, numbers by name + bounds.
+  // P2 7.2: `webrtc.mode` is a string enum, not a boolean, so it needs its own
+  // whitelist. Only the three known values are copied, and the effective mode is
+  // then derived exactly like hooks_webrtc.js does - that shared derivation is
+  // what stops the two worlds from disagreeing about the SDP rewrite policy.
+  const WEBRTC_MODES = ['off', 'block-host-srflx', 'relay-only'];
+  function effectiveWebrtcMode(group) {
+    const g = group || {};
+    if (WEBRTC_MODES.indexOf(g.mode) !== -1) return g.mode;
+    if (g.forceRelay === true) return 'relay-only';
+    if (g.blockIPLeak === false) return 'off';
+    return 'block-host-srflx';
+  }
+  const CONFIG_GROUP_STRING_KEYS = {
+    webrtc: ['mode']
+  };
   const CONFIG_GROUP_BOOLEAN_KEYS = {
     navigator: ['fuzzHardwareConcurrency', 'fuzzDeviceMemory', 'shuffleLanguages'],
     webrtc: ['blockIPLeak', 'randomizeSDP', 'forceRelay'],
@@ -81,6 +116,7 @@
       const key = CONFIG_BOOLEAN_KEYS[i];
       if (typeof raw[key] === 'boolean') out[key] = raw[key];
     }
+    if (PERSONA_MODES.indexOf(raw.persona) !== -1) out.persona = raw.persona;
     for (const key in CONFIG_BOUNDS) {
       const value = raw[key];
       if (typeof value !== 'number' || !isFinite(value)) continue;
@@ -92,6 +128,16 @@
       const value = raw[group];
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
       const copy = {};
+      const strKeys = CONFIG_GROUP_STRING_KEYS[group] || [];
+      for (let s = 0; s < strKeys.length; s++) {
+        const sk = strKeys[s];
+        const sv = value[sk];
+        if (sk === 'mode') {
+          if (WEBRTC_MODES.indexOf(sv) !== -1) copy[sk] = sv;
+        } else if (typeof sv === 'string') {
+          copy[sk] = sv;
+        }
+      }
       const boolKeys = CONFIG_GROUP_BOOLEAN_KEYS[group] || [];
       for (let j = 0; j < boolKeys.length; j++) {
         const gk = boolKeys[j];
@@ -177,7 +223,53 @@
     const debug = config.debug || false;
     const log = debug ? console.log.bind(console) : () => {};
 
+    // P2 (statistics §7.1): the ISOLATED hooks already increment
+    // ssStatsTracker, but every hook that lives in this file was invisible to
+    // the counters - the page could read a canvas, a WebGL parameter or an
+    // AudioBuffer a million times and the popup still reported zero. Report
+    // each MAIN-world read back over the same window.postMessage channel the
+    // handshake uses; stats_tracker.js picks these up and folds them into the
+    // existing counters, so both worlds contribute to one number.
+    // The category name is validated on the receiving side, and the message
+    // carries no page data - only a fixed label - so nothing about the page
+    // leaks through it.
+    function bumpStat(category) {
+      try {
+        window.postMessage({
+          type: 'SS_STAT',
+          protocol: 1,
+          category: category
+        }, location.origin);
+      } catch (e) { /* never break a hook over a counter */ }
+    }
+
     log('[shapeshift][page] Initializing page-world hooks with config:', config);
+
+    // P2 7.2 (coherent persona): every surface used to pick its persona
+    // independently, so one origin could advertise a MacIntel platform, an
+    // "ANGLE (Apple, Apple M1 ...)" renderer and a Win32-shaped client hint at
+    // the same time - a combination no real machine produces, which is itself a
+    // stronger fingerprint than any single real value. One ':persona' pick now
+    // selects the OS family, and every surface filters its candidate list by it
+    // so the bundle is coherent while each surface keeps its own ':gpu'/':ua'
+    // stream. hooks_webgl.js computes the identical pick from the identical key.
+    const PERSONA_OS = ['windows', 'mac', 'linux'];
+    // P2 7.4: an explicit profile pins the family; 'auto' (or an absent key)
+    // keeps the seed-derived pick. Both branches yield one of PERSONA_OS, so
+    // every downstream `.filter((p) => p.os === personaOs)` is non-empty.
+    const personaOs = PERSONA_OS.indexOf(config.persona) !== -1
+      ? config.persona
+      : PERSONA_OS[hashString(seed + ':persona') % PERSONA_OS.length];
+
+    // P1 5.3 (own-property leak): real Chrome keeps every navigator field as an
+    // accessor on Navigator.prototype; the instance's own property list is
+    // EMPTY. Defining shadows on `navigator` itself put hardwareConcurrency,
+    // deviceMemory, plugins, mimeTypes, maxTouchPoints, userAgent, appVersion,
+    // platform, userAgentData and webdriver into
+    // Object.getOwnPropertyNames(navigator) - a one-line detector that also
+    // disagreed with the ISOLATED world. Every field below is now defined on
+    // this prototype, exactly like hooks_screen.js does for Screen.
+    const navProto = Object.getPrototypeOf(navigator) || navigator;
 
     // P1 (determinism): the streaming `prng`/`gaussianNoise`/`noise` trio used
     // to live here. Every call site has since moved to hashString(seed + …),
@@ -202,8 +294,16 @@
         // Per-byte noise keyed on (seed, index) so two reads of the same canvas
         // return identical pixels. A streaming PRNG would change on every read,
         // which is itself a detectable signal.
+        //
+        // P1 (hot loop): the old per-byte hash re-folded the whole `<seed>:`
+        // prefix for every byte, so a 1920x1080 read built ~6M strings and
+        // ~90M character folds in the page's own thread. The prefix state is
+        // folded once here and each byte only folds its own index digits; FNV-1a
+        // is a pure sequential fold, so the value is byte-identical to the old
+        // formula and both worlds still agree on every pixel.
+        const canvasPrefixState = fnvUpdate(FNV_OFFSET, canvasSeed + ':');
         function pixelNoise(index) {
-          const h = hashString(canvasSeed + ':' + index);
+          const h = fnvUpdate(canvasPrefixState, index);
           return ((h / 4294967296) - 0.5) * noiseStrength;
         }
 
@@ -219,6 +319,7 @@
         }
 
         CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+          bumpStat('canvasReads');
           return noisedImageData(this, x, y, w, h);
         };
 
@@ -311,6 +412,7 @@
         if (offscreenProto && offscreenProto.getImageData) {
           const origOffscreenGetImageData = offscreenProto.getImageData;
           offscreenProto.getImageData = function (x, y, w, h) {
+            bumpStat('canvasReads');
             const imgData = origOffscreenGetImageData.call(this, x, y, w, h);
             const data = imgData.data;
             for (let i = 0; i < data.length; i += 4) {
@@ -396,8 +498,14 @@
             // P1: patched accessors must be non-enumerable, exactly like the
             // native Screen/Window getters they replace. An enumerable shadow
             // shows up in Object.keys(screen) and is a one-line oracle.
+            // P2 4.4: this world is the only copy the page can read, so it is
+            // also the only place a screen read can be observed - report it
+            // over the same SS_STAT bridge the canvas and WebGL hooks use.
             Object.defineProperty(obj, prop, {
-              get: getter,
+              get: function () {
+                bumpStat('screenReads');
+                return getter.call(this);
+              },
               enumerable: false,
               configurable: true
             });
@@ -406,12 +514,22 @@
           }
         }
 
-        defineGetter(window.screen, 'width', () => spoofed.width);
-        defineGetter(window.screen, 'height', () => spoofed.height);
-        defineGetter(window.screen, 'availWidth', () => spoofed.width);
-        defineGetter(window.screen, 'availHeight', () => spoofed.height - availOffset);
-        defineGetter(window.screen, 'colorDepth', () => spoofedColorDepth);
-        defineGetter(window.screen, 'pixelDepth', () => spoofedColorDepth);
+        // P2 5.3 (own-property leak): these getters used to be defined on the
+        // `window.screen` INSTANCE, so `Object.getOwnPropertyNames(screen)`
+        // returned ten names where a real Chrome returns none (every screen
+        // field is an accessor on Screen.prototype). One line revealed the
+        // extension even though the values themselves looked plausible. Define
+        // on the prototype, exactly like the MAIN-world navigator hooks and
+        // hooks_useragent.js do.
+        const screenProto = Object.getPrototypeOf(window.screen) || window.screen;
+        defineGetter(screenProto, 'width', () => spoofed.width);
+        defineGetter(screenProto, 'height', () => spoofed.height);
+        defineGetter(screenProto, 'availWidth', () => spoofed.width);
+        defineGetter(screenProto, 'availHeight', () => spoofed.height - availOffset);
+        defineGetter(screenProto, 'colorDepth', () => spoofedColorDepth);
+        defineGetter(screenProto, 'pixelDepth', () => spoofedColorDepth);
+        // devicePixelRatio IS an own accessor of the window object natively, so
+        // it stays on `window` itself.
         defineGetter(window, 'devicePixelRatio', () => spoofedPixelRatio);
         // P2: availLeft/availTop are separate high-entropy values that the
         // previous build left fully real (and disagreeing with a spoofed
@@ -419,8 +537,29 @@
         // Real desktop screens report 0; a non-zero availLeft/availTop is a
         // multi-monitor tell, so pin both to 0 rather than inventing an offset
         // that would disagree with availWidth.
-        defineGetter(window.screen, 'availLeft', () => 0);
-        defineGetter(window.screen, 'availTop', () => 0);
+        defineGetter(screenProto, 'availLeft', () => 0);
+        defineGetter(screenProto, 'availTop', () => 0);
+        // (screen.orientation is re-asserted on its prototype below.)
+
+        // P2 7.3: screen.orientation was hooked only in the ISOLATED world, so
+        // the page read the untouched native object (owner/patch-state oracle).
+        // It is re-asserted here on ScreenOrientation.prototype - not on the
+        // instance - so Object.getOwnPropertyNames(screen.orientation) stays as
+        // empty as it is natively, and the REAL values are preserved because
+        // rewriting the angle breaks every orientation-driven app.
+        const orientation = window.screen && window.screen.orientation;
+        const OrientationCtor = window.ScreenOrientation;
+        if (orientation && OrientationCtor && OrientationCtor.prototype) {
+          for (const prop of ['type', 'angle']) {
+            const desc = Object.getOwnPropertyDescriptor(OrientationCtor.prototype, prop);
+            if (!desc || typeof desc.get !== 'function') continue;
+            Object.defineProperty(OrientationCtor.prototype, prop, {
+              get: function () { return desc.get.call(this); },
+              enumerable: false,
+              configurable: true
+            });
+          }
+        }
 
         log('[shapeshift][page][screen] Hooks installed');
       } catch (e) {
@@ -431,6 +570,12 @@
     // ========================================================================
     // NAVIGATOR HOOKS
     // ========================================================================
+    // Shared with the worker shim further down: a worker realm that advertises
+    // a different core count or memory class than the page is a one-round-trip
+    // oracle, so both must repeat the SAME derived values instead of drawing
+    // from two independent hash streams (P1 world-split).
+    let ssNavCores = null;
+    let ssNavMemory = null;
     if (config.enableNavigatorFuzz) {
       try {
         const nav = navigator;
@@ -444,21 +589,25 @@
           (hashString(seed + ':nav:cores') % 5) - 2);
         const fuzzedMemory = Math.max(4, realDeviceMemory +
           (hashString(seed + ':nav:memory') % 5) - 2);
+        // Published for the worker shim, which must repeat these exact numbers
+        // rather than re-fuzz the already-spoofed navigator getters.
+        ssNavCores = fuzzedConcurrency;
+        ssNavMemory = fuzzedMemory;
 
         // configurable: true so a later stage (or a user re-init) can redefine
         // the property; a non-configurable descriptor here permanently blocked
         // every other hook from touching deviceMemory.
         if (config.navigator?.fuzzHardwareConcurrency !== false) {
-          Object.defineProperty(navigator, 'hardwareConcurrency', {
-            get: () => fuzzedConcurrency,
+          Object.defineProperty(navProto, 'hardwareConcurrency', {
+            get: () => { bumpStat('navigatorReads'); return fuzzedConcurrency; },
             enumerable: false,
             configurable: true
           });
         }
 
         if (config.navigator?.fuzzDeviceMemory !== false && 'deviceMemory' in navigator) {
-          Object.defineProperty(navigator, 'deviceMemory', {
-            get: () => fuzzedMemory,
+          Object.defineProperty(navProto, 'deviceMemory', {
+            get: () => { bumpStat('navigatorReads'); return fuzzedMemory; },
             enumerable: false,
             configurable: true
           });
@@ -552,8 +701,14 @@
         const candidates = timezonesByOffset[offsetKey] || [];
 
         const realZone = OrigIntlDateTimeFormat().resolvedOptions().timeZone;
-        const sampleA = new Date();
-        const sampleB = new Date(Date.now() + 182 * 24 * 60 * 60 * 1000);
+        // P1 determinism: these probes used `new Date()` / `Date.now()`, so the
+        // DST-consistent candidate set - and therefore the zone the seed picked
+        // out of it - changed with the season: the same (salt, origin) could
+        // advertise one zone today and a different one six months later. Probe
+        // two fixed instants instead. The ISOLATED hook uses the same pair, so
+        // the two worlds can never disagree about the candidate set.
+        const sampleA = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
+        const sampleB = new Date(Date.UTC(2024, 6, 15, 12, 0, 0));
         const realA = zoneOffsetMinutes(realZone, sampleA);
         const realB = zoneOffsetMinutes(realZone, sampleB);
 
@@ -568,23 +723,34 @@
           const spoofedZone = availableZones[
             hashString(seed + ':tz:' + offsetKey) % availableZones.length];
 
-          // Hook Intl.DateTimeFormat to return spoofed timezone
-          Intl.DateTimeFormat = function(...args) {
-            const instance = new OrigIntlDateTimeFormat(...args);
-            const origResolvedOptions = instance.resolvedOptions;
-
-            instance.resolvedOptions = function() {
-              const options = origResolvedOptions.call(this);
-              options.timeZone = spoofedZone;
-              return options;
-            };
-
-            return instance;
+          // P2 5.3 (own-property leak): this used to assign a fresh closure to
+          // EVERY instance's own `resolvedOptions`. Real Chrome returns [] from
+          // Object.getOwnPropertyNames(new Intl.DateTimeFormat()) while the
+          // shim returned ['resolvedOptions'] - a one-line oracle - and
+          // `.resolvedOptions.toString()` printed the hook source. Patch the
+          // shared PROTOTYPE with one named function instead; the toString
+          // guard below registers it so it answers the native form.
+          const origResolvedOptions = OrigIntlDateTimeFormat.prototype.resolvedOptions;
+          OrigIntlDateTimeFormat.prototype.resolvedOptions = function () {
+            bumpStat('timezoneReads');
+            const options = origResolvedOptions.call(this);
+            options.timeZone = spoofedZone;
+            return options;
           };
 
-          // Copy static properties
+          // Hook Intl.DateTimeFormat to return spoofed timezone
+          Intl.DateTimeFormat = function(...args) {
+            return new OrigIntlDateTimeFormat(...args);
+          };
+
+          // Preserve the full static surface and the prototype chain, using the
+          // exact spelling the ISOLATED hook uses (hooks_timezone.js). Handing
+          // back the native prototype OBJECT - not a fresh object that merely
+          // inherits from it - keeps Object.getOwnPropertyNames() on it equal to
+          // the native list; setPrototypeOf left only ['constructor'] own, which
+          // no real Intl.DateTimeFormat.prototype reports.
           Object.setPrototypeOf(Intl.DateTimeFormat, OrigIntlDateTimeFormat);
-          Object.setPrototypeOf(Intl.DateTimeFormat.prototype, OrigIntlDateTimeFormat.prototype);
+          Intl.DateTimeFormat.prototype = OrigIntlDateTimeFormat.prototype;
 
           log('[shapeshift][page][timezone] Real offset:', realOffset, 'Spoofed zone:', spoofedZone);
         } else {
@@ -611,21 +777,56 @@
           0x8B4D /* MAX_COMBINED_UNIFORM_BLOCKS */, 0x8DFB /* MAX_ELEMENT_INDEX */,
           0x8B4C /* MAX_UNIFORM_BLOCK_SIZE */, 0x0D3A /* MAX_VIEWPORT_DIMS */
         ]);
+        // P0: every gl.getParameter integer query (MAX_TEXTURE_IMAGE_UNITS,
+        // MAX_RENDERBUFFER_SIZE, MAX_VARYING_VECTORS, ...) must stay an integer.
+        // The previous formula returned a fraction for every parameter outside
+        // the eight-entry set above, so a single integer probe exposed the shim
+        // immediately. Decide by the *returned value*, not by the enum: a whole
+        // number stays whole, and a float/array/string is never rounded.
+        const isIntegerValue = (v) => typeof v === 'number' && Number.isInteger(v);
         const maskVendors = config.maskWebGLVendorStrings !== false;
         const shuffleExt = config.shuffleWebGLExtensions !== false;
+        // P0: real GPU vendor/renderer strings never contain an extension
+        // namespace, and appending one both leaked the extension name into
+        // page-readable output and was itself a one-line fingerprint. Pick a
+        // plausible real pair deterministically from the seed instead.
+        // P2 7.2 (coherent persona): each entry is tagged with the OS family it
+        // can actually come from, and only the entries matching the shared
+        // ':persona' pick are eligible. A D3D11/ANGLE renderer behind MacIntel -
+        // or a Mesa renderer behind Win32 - is a combination no real machine
+        // produces, which is a stronger fingerprint than any single real value.
+        // hooks_webgl.js holds this identical list in this identical order with
+        // the identical filter, so both worlds still answer with the same pair.
+        const GPU_PERSONAS_ALL = [
+          { os: 'windows', vendor: 'Google Inc. (NVIDIA)', renderer: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
+          { os: 'windows', vendor: 'Google Inc. (Intel)', renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
+          { os: 'windows', vendor: 'Google Inc. (AMD)', renderer: 'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
+          { os: 'mac', vendor: 'Google Inc. (Apple)', renderer: 'ANGLE (Apple, Apple M1, OpenGL 4.1)' },
+          { os: 'linux', vendor: 'Google Inc. (Intel)', renderer: 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (CML GT2), OpenGL 4.6 (Core Profile) Mesa 21.2.6)' },
+          { os: 'linux', vendor: 'Google Inc. (AMD)', renderer: 'ANGLE (AMD, AMD Radeon RX 580 (POLARIS10, DRM 3.40.0, LLVM 12.0.1), OpenGL 4.6 (Core Profile) Mesa 21.2.6)' }
+        ];
+        const GPU_PERSONAS = GPU_PERSONAS_ALL.filter((p) => p.os === personaOs);
+        const gpuPersona = GPU_PERSONAS[hashString(seed + ':gpu') % GPU_PERSONAS.length];
+        const GPU_VENDOR_STRING = gpuPersona.vendor;
+        const GPU_RENDERER_STRING = gpuPersona.renderer;
 
         function patchWebGL(proto) {
           if (!proto || !proto.getParameter) return;
           const origGetParameter = proto.getParameter;
 
           proto.getParameter = function(p) {
+            bumpStat('webglCalls');
             const value = origGetParameter.call(this, p);
 
             if (typeof value === 'number') {
-              if (INTEGER_LIMIT_PARAMS.has(p)) return value;
+              // P0: integer-valued queries must stay integer, and the eight
+              // hardware-limit params above must stay exact.
+              if (INTEGER_LIMIT_PARAMS.has(p) || isIntegerValue(value)) return value;
               // Perturb only within a small relative band so derived quantities
-              // (aspect ratios, unit scales) stay internally consistent.
-              return value + ((hashString(seed + ':wgl:' + p) % 1000) / 1000 - 0.5) * jitter;
+              // (aspect ratios, unit scales) stay internally consistent. Key the
+              // offset on (p, value) so two params that hash alike no longer
+              // receive an identical shift.
+              return value + ((hashString(seed + ':wgl:' + p + ':' + value) % 1000) / 1000 - 0.5) * jitter;
             }
 
             const gl = this;
@@ -648,8 +849,13 @@
             // getParameter(VENDOR) reads return the same string. A streaming
             // PRNG here made two reads disagree, which is trivially detectable.
             if (maskVendors && vendorParams.includes(p) && typeof value === 'string') {
-              const suffix = (hashString(seed + ':webgl:' + p + ':' + value) % 0xFFFF) || 1;
-              return value + ' (ss-' + suffix + ')';
+              // P0: replace with a coherent persona string instead of appending
+              // a marker. Real GPU strings never contain an extension namespace,
+              // and '(ss-...)' leaked the extension name into page-readable
+              // output. Vendor and renderer come from the same persona, so
+              // VENDOR / RENDERER / UNMASKED_* never contradict each other.
+              const isRenderer = p === gl.RENDERER || p === UNMASKED_RENDERER;
+              return isRenderer ? GPU_RENDERER_STRING : GPU_VENDOR_STRING;
             }
 
             return value;
@@ -664,10 +870,18 @@
             const origGetSupportedExtensions = proto.getSupportedExtensions;
             proto.getSupportedExtensions = function () {
               const list = origGetSupportedExtensions.call(this);
-              if (Array.isArray(list)) {
-                return list.slice().reverse();
+              if (!Array.isArray(list)) return list;
+              // P0: a plain .reverse() produced the same fixed order on every
+              // machine - a strong deterministic tell no real browser emits.
+              // Deterministically permute with a seed-keyed Fisher-Yates pass
+              // so the SET stays identical to the native one and only the
+              // order varies per install.
+              const out = list.slice();
+              for (let i = out.length - 1; i > 0; i--) {
+                const j = hashString(seed + ':wglext:' + i + ':' + out[i]) % (i + 1);
+                const tmp = out[i]; out[i] = out[j]; out[j] = tmp;
               }
-              return list;
+              return out;
             };
           }
         }
@@ -713,6 +927,86 @@
     }
 
     // ========================================================================
+    // WEBGPU HOOKS (P2 7.3)
+    //
+    // navigator.gpu was completely unprotected, so a page could read the real
+    // GPU out of GPUAdapter.info while the WebGL hook reported a persona - two
+    // answers for one machine, which is itself a fingerprint. WebGPU exposes no
+    // per-context vendor enum, only the async adapter, so the patch is on
+    // requestAdapter plus the GPUAdapter.prototype.info accessor and the persona
+    // is derived from the same ':gpu' key as the WebGL one.
+    // ========================================================================
+    if (config.enableWebGPUProtection) {
+      try {
+        const gpu = navigator.gpu;
+        const GPUAdapterCtor = window.GPUAdapter;
+        if (gpu && typeof gpu.requestAdapter === 'function' &&
+            GPUAdapterCtor && GPUAdapterCtor.prototype) {
+          // Same list ordering as the WebGL personas, so the vendor a page reads
+          // back through WebGPU agrees with the one WebGL reports.
+          // P2 7.2: same OS tags, same order and same filter as GPU_PERSONAS_ALL
+          // above, so index i of the filtered list always names the same GPU in
+          // both the WebGL and the WebGPU answer.
+          const WEBGPU_PERSONAS_ALL = [
+            { os: 'windows', vendor: 'nvidia', architecture: 'ampere', device: '0x2484', description: 'NVIDIA GeForce GTX 1660' },
+            { os: 'windows', vendor: 'intel', architecture: 'gen-9', device: '0x5917', description: 'Intel(R) UHD Graphics 620' },
+            { os: 'windows', vendor: 'amd', architecture: 'gcn-4', device: '0x67df', description: 'AMD Radeon RX 580' },
+            { os: 'mac', vendor: 'apple', architecture: 'apple-m1', device: '0x0000', description: 'Apple M1' },
+            { os: 'linux', vendor: 'intel', architecture: 'gen-9', device: '0x5917', description: 'Intel(R) UHD Graphics 620 (CML GT2)' },
+            { os: 'linux', vendor: 'amd', architecture: 'gcn-4', device: '0x67df', description: 'AMD Radeon RX 580 (POLARIS10)' }
+          ];
+          const WEBGPU_PERSONAS = WEBGPU_PERSONAS_ALL.filter((p) => p.os === personaOs);
+          const webgpuPersona = WEBGPU_PERSONAS[
+            hashString(seed + ':gpu') % WEBGPU_PERSONAS.length];
+
+          // The adapter instance is keyed in a WeakMap and the spoof happens in
+          // the prototype getter, so no own property ever appears on the adapter
+          // (Object.getOwnPropertyNames(adapter) must stay as native as it was).
+          const adapterPersona = new WeakMap();
+          const origInfoDesc = Object.getOwnPropertyDescriptor(GPUAdapterCtor.prototype, 'info');
+          if (origInfoDesc && typeof origInfoDesc.get === 'function') {
+            Object.defineProperty(GPUAdapterCtor.prototype, 'info', {
+              get: function () {
+                const real = origInfoDesc.get.call(this);
+                const persona = adapterPersona.get(this);
+                if (!persona) return real;
+                return {
+                  vendor: persona.vendor,
+                  architecture: persona.architecture,
+                  device: persona.device,
+                  description: persona.description
+                };
+              },
+              enumerable: false,
+              configurable: true
+            });
+          }
+
+          const origRequestAdapter = gpu.requestAdapter;
+          const tagAdapter = function (adapter) {
+            if (adapter && typeof adapter === 'object') {
+              try { adapterPersona.set(adapter, webgpuPersona); } catch (e) { /* ignore */ }
+            }
+            return adapter;
+          };
+          gpu.requestAdapter = function () {
+            const result = origRequestAdapter.apply(this, arguments);
+            // requestAdapter returns a promise; a non-promise result is only
+            // possible in a stub environment, so pass it through either way.
+            if (result && typeof result.then === 'function') {
+              return result.then(tagAdapter);
+            }
+            return tagAdapter(result);
+          };
+        }
+
+        log('[shapeshift][page][webgpu] Hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][webgpu] Failed:', e);
+      }
+    }
+
+    // ========================================================================
     // AUDIO HOOKS
     // ========================================================================
     if (config.enableAudioNoise) {
@@ -724,6 +1018,7 @@
           const audioSeed = seed >>> 0;
           const origGetChannelData = AudioBuffer.prototype.getChannelData;
           AudioBuffer.prototype.getChannelData = function(channel) {
+            bumpStat('audioCalls');
             const data = origGetChannelData.call(this, channel);
             // Copy first: the native call returns the buffer's live Float32Array,
             // so writing into it corrupted the real audio samples and made the
@@ -791,6 +1086,9 @@
         if (CanvasProto.measureText) {
           const origMeasureText = CanvasProto.measureText;
           CanvasProto.measureText = function (text) {
+            // P2 4.4: the ISOLATED font hook counted fontReads, but measureText
+            // is only ever observed here, so the counter never moved. Report it.
+            bumpStat('fontReads');
             const metrics = origMeasureText.call(this, text);
             // P1 2.8: only perturb finite numbers - undefined + noise made NaN.
             const nn = (value, scale, key) => (
@@ -835,6 +1133,7 @@
         if (document.fonts && document.fonts.check) {
           const origCheck = document.fonts.check;
           document.fonts.check = function (font, text) {
+            bumpStat('fontReads');
             const result = origCheck.call(this, font, text);
             // P1 2.7: only upgrade absent -> present, deterministically.
             if (result === false) {
@@ -843,6 +1142,46 @@
             }
             return result;
           };
+        }
+
+        // P1 4.1: the ISOLATED font hook also shuffled `document.fonts`
+        // iteration, but an ISOLATED patch is invisible to the page, so the
+        // real order stayed readable. Patch the PROTOTYPE here (not the
+        // instance) so no own symbol appears on document.fonts - the native
+        // iterator lives on FontFaceSet.prototype, and a page that calls
+        // Object.getOwnPropertySymbols(document.fonts) must still see [].
+        // The live set is read on every iteration and permuted with the same
+        // (seed, index, family) key as the ISOLATED copy, so the two worlds
+        // agree and repeat iterations of an unchanged set are identical.
+        if (document.fonts) {
+          const FontFaceSetProto = Object.getPrototypeOf(document.fonts);
+          const origFontsIterator = FontFaceSetProto && FontFaceSetProto[Symbol.iterator];
+          if (origFontsIterator) {
+            Object.defineProperty(FontFaceSetProto, Symbol.iterator, {
+              // P2 5.3: named `values` exactly like the native accessor this
+              // replaces, so the toString guard can answer the real
+              // `function values() { [native code] }` shape instead of the
+              // anonymous closure source.
+              value: function values () {
+                const live = Array.from(origFontsIterator.call(this));
+                for (let i = live.length - 1; i > 0; i--) {
+                  const j = hashString(fontSeed + ':fontorder:' + i + ':' + live[i].family) % (i + 1);
+                  const tmp = live[i]; live[i] = live[j]; live[j] = tmp;
+                }
+                const iterator = live[Symbol.iterator]();
+                // Present the native iterator's prototype so
+                // Object.prototype.toString.call(it) still looks native
+                // instead of reporting an Array Iterator.
+                try {
+                  Object.setPrototypeOf(iterator, Object.getPrototypeOf(origFontsIterator.call(this)));
+                } catch (e) { /* keep the array iterator */ }
+                return iterator;
+              },
+              writable: true,
+              enumerable: false,
+              configurable: true
+            });
+          }
         }
 
         log('[shapeshift][page][fonts] Hooks installed');
@@ -856,8 +1195,11 @@
     // ========================================================================
     if (config.enableWebRTCProtection) {
       try {
-        const blockIPLeak = !config.webrtc || config.webrtc.blockIPLeak !== false;
-        const randomizeSDP = !config.webrtc || config.webrtc.randomizeSDP !== false;
+        // P2 7.2: derive the policy with the same helper hooks_webrtc.js uses, so
+        // the two worlds cannot disagree about which SDP rewrite is in force.
+        const webrtcMode = effectiveWebrtcMode(config.webrtc);
+        const blockIPLeak = webrtcMode !== 'off';
+        const forceRelay = webrtcMode === 'relay-only';
         const webrtcSeed = seed >>> 0;
 
         if (window.RTCPeerConnection) {
@@ -890,7 +1232,22 @@
           }
 
           window.RTCPeerConnection = function (configuration, constraints) {
-            const pc = new OrigRTCPeerConnection(configuration, constraints);
+            // P2 7.2: `relay-only` has to reach the constructor in this world too,
+            // otherwise the ISOLATED hook forces relay ICE while the MAIN world
+            // still gathers host candidates - two worlds disagreeing about the
+            // same connection is itself a fingerprint. Copy the caller's config
+            // instead of mutating it.
+            let effectiveConfiguration = configuration;
+            if (forceRelay) {
+              effectiveConfiguration = Object.assign({}, configuration || {}, {
+                iceTransportPolicy: 'relay'
+              });
+            }
+            // P2 4.4: the ISOLATED RTCPeerConnection hook incremented webrtcCalls,
+            // but a page that constructs a connection reaches this MAIN-world
+            // wrapper, so the counter never moved for a real connection.
+            bumpStat('webrtcCalls');
+            const pc = new OrigRTCPeerConnection(effectiveConfiguration, constraints);
             const origSetLocal = pc.setLocalDescription;
             pc.setLocalDescription = function (description) {
               if (description && description.sdp) {
@@ -911,7 +1268,17 @@
                 const text = candidate && candidate.candidate;
                 if (typeof text === 'string' &&
                     (text.indexOf('typ host') !== -1 || text.indexOf('typ srflx') !== -1)) {
-                  return Promise.resolve();
+                  // P1 3.3 (MAIN parity): a bare Promise.resolve() is a different
+                  // thenable identity than the native method's promise and can
+                  // never reject - a one-line shape oracle. Calling the native
+                  // method with no candidate is a legal no-op that resolves, so
+                  // the caller still gets a real native promise. Fall back only
+                  // if even that throws.
+                  try {
+                    return origAddIce.call(this);
+                  } catch (e) {
+                    return Promise.resolve();
+                  }
                 }
                 return origAddIce.apply(this, arguments);
               };
@@ -1018,6 +1385,9 @@
         if (navigator.getBattery) {
           const origGetBattery = navigator.getBattery;
           navigator.getBattery = function () {
+            // P2 4.4: only the ISOLATED copy counted sensorReads, so a page that
+            // read the battery through this world's hook never moved the counter.
+            bumpStat('sensorReads');
             return origGetBattery.call(this).then(function (battery) {
               const realCharging = battery.charging === true;
               const realDischargingTime = battery.dischargingTime;
@@ -1053,7 +1423,8 @@
             get usedJSHeapSize () { return Math.floor(baseUsed + jitter('mu', baseUsed * 0.1)); }
           };
           Object.defineProperty(performance, 'memory', {
-            get: () => noisedMemory, enumerable: false, configurable: true
+            get: () => { bumpStat('sensorReads'); return noisedMemory; },
+            enumerable: false, configurable: true
           });
         }
 
@@ -1064,15 +1435,21 @@
             hashString(seed + ':conn') % connectionTypes.length];
           const spoofedDownlink = spoofedType === 'wifi' ? 10 : 5;
           Object.defineProperty(connection, 'effectiveType', {
-            get: () => spoofedType, enumerable: false, configurable: true
+            get: () => { bumpStat('sensorReads'); return spoofedType; },
+            enumerable: false, configurable: true
           });
           Object.defineProperty(connection, 'downlink', {
-            get: () => spoofedDownlink, enumerable: false, configurable: true
+            get: () => { bumpStat('sensorReads'); return spoofedDownlink; },
+            enumerable: false, configurable: true
           });
         }
 
-        if (navigator.getGamepads) {
-          navigator.getGamepads = function () { return []; };
+        // P2: this returned [] unconditionally, so a page that actually wants
+        // gamepad input silently lost it and the config toggle the ISOLATED
+        // world honours (sensors.hideGamepads) was ignored here. Only hide the
+        // list when the user asked for it, and answer in the native shape.
+        if (navigator.getGamepads && (!config.sensors || config.sensors.hideGamepads !== false)) {
+          navigator.getGamepads = function () { bumpStat('sensorReads'); return []; };
         }
 
         // Plugin enumeration: shadow the real PluginArray/MimeTypeArray with an
@@ -1099,11 +1476,20 @@
             return undefined;
           }
         });
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => emptyView(realPlugins), enumerable: false, configurable: true
+        // P1 identity stability: the Proxy must be built ONCE. Wrapping inside
+        // the getter returned a fresh object on every read, so
+        // `navigator.plugins === navigator.plugins` was false - a one-line
+        // oracle, and it disagreed with the ISOLATED world, which caches its
+        // proxies correctly (hooks_sensors.js).
+        const emptyPlugins = emptyView(realPlugins);
+        const emptyMimeTypes = emptyView(realMimeTypes);
+        Object.defineProperty(navProto, 'plugins', {
+          get: () => { bumpStat('sensorReads'); return emptyPlugins; },
+          enumerable: false, configurable: true
         });
-        Object.defineProperty(navigator, 'mimeTypes', {
-          get: () => emptyView(realMimeTypes), enumerable: false, configurable: true
+        Object.defineProperty(navProto, 'mimeTypes', {
+          get: () => { bumpStat('sensorReads'); return emptyMimeTypes; },
+          enumerable: false, configurable: true
         });
 
         log('[shapeshift][page][sensors] Hooks installed');
@@ -1120,8 +1506,9 @@
         const touchCaps = [0, 0, 0, 0, 1, 5, 10];
         const spoofedTouch = touchCaps[hashString(seed + ':touch') % touchCaps.length];
 
-        Object.defineProperty(navigator, 'maxTouchPoints', {
-          get: () => spoofedTouch, enumerable: false, configurable: true
+        Object.defineProperty(navProto, 'maxTouchPoints', {
+          get: () => { bumpStat('touchReads'); return spoofedTouch; },
+          enumerable: false, configurable: true
         });
 
         const shouldHaveTouch = spoofedTouch > 0;
@@ -1153,13 +1540,64 @@
               if (lower.includes('hover:') && lower.includes('hover')) return !shouldHaveTouch;
               return result.matches;
             }
-            return new Proxy(result, {
+            // P2 4.4 (listener oracle): addEventListener used to be forwarded to
+            // the REAL MediaQueryList, so a handler fired with `event.target` and
+            // `this` equal to the real list - reading `e.target.matches` there
+            // returned the un-spoofed value and defeated the whole shim. Each
+            // callback is wrapped so the event it observes carries this proxy as
+            // target/currentTarget and the spoofed `matches`; removal is mapped
+            // back to the original reference so removeEventListener still works.
+            // This mirrors hooks_touch.js so both worlds answer identically.
+            const listenerMap = new WeakMap();
+            let proxy = null;
+
+            const wrapListener = (listener) => {
+              if (typeof listener !== 'function') return listener;
+              let wrapped = listenerMap.get(listener);
+              if (wrapped) return wrapped;
+              wrapped = function (event) {
+                let seen = event;
+                try {
+                  seen = new Proxy(event, {
+                    get (t, prop) {
+                      if (prop === 'target' || prop === 'currentTarget') return proxy;
+                      if (prop === 'matches') return spoofedMatches();
+                      const v = t[prop];
+                      return typeof v === 'function' ? v.bind(t) : v;
+                    }
+                  });
+                } catch (err) { seen = event; }
+                return listener.call(proxy, seen);
+              };
+              listenerMap.set(listener, wrapped);
+              return wrapped;
+            };
+
+            const handler = {
               get (target, prop) {
                 if (prop === 'matches') return spoofedMatches();
+                if (prop === 'addEventListener' || prop === 'addListener') {
+                  return function (listener, rest) {
+                    return target[prop](wrapListener(listener), rest);
+                  };
+                }
+                if (prop === 'removeEventListener' || prop === 'removeListener') {
+                  return function (listener, rest) {
+                    return target[prop](listenerMap.get(listener) || listener, rest);
+                  };
+                }
                 const v = target[prop];
                 return typeof v === 'function' ? v.bind(target) : v;
               }
-            });
+            };
+
+            proxy = new Proxy(result, handler);
+            // Force the own `matches` value so a listener that fires immediately
+            // observes the spoofed state even before the get trap runs.
+            try {
+              Object.defineProperty(proxy, 'matches', { value: spoofedMatches(), configurable: true });
+            } catch (e) { /* non-extensible MediaQueryList; the get trap still wins */ }
+            return proxy;
           }
           return result;
         };
@@ -1176,11 +1614,16 @@
     // ========================================================================
     if (config.enableUserAgentProtection) {
       try {
-        const platforms = [
-          { platform: 'Win32', ua: 'Windows NT 10.0; Win64; x64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
-          { platform: 'MacIntel', ua: 'Macintosh; Intel Mac OS X 10_15_7', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
-          { platform: 'Linux x86_64', ua: 'X11; Linux x86_64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] }
+        const platformsAll = [
+          { os: 'windows', platform: 'Win32', ua: 'Windows NT 10.0; Win64; x64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
+          { os: 'mac', platform: 'MacIntel', ua: 'Macintosh; Intel Mac OS X 10_15_7', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] },
+          { os: 'linux', platform: 'Linux x86_64', ua: 'X11; Linux x86_64', brands: ['Chromium', 'Google Chrome', 'Not-A.Brand'] }
         ];
+        // P2 7.2: the OS family is owned by the shared ':persona' pick, so the
+        // UA platform, the client hints and the GPU renderer can never describe
+        // three different machines. hooks_useragent.js derives the same family
+        // from the same key.
+        const platforms = platformsAll.filter((p) => p.os === personaOs);
         const persona = platforms[hashString(seed + ':ua') % platforms.length];
         const majorMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
         const major = majorMatch ? majorMatch[1] : '126';
@@ -1196,13 +1639,13 @@
           'Mozilla/5.0 (' + persona.ua + ') AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' +
           major + '.0.' + build + '.' + patch + ' Safari/537.36';
 
-        Object.defineProperty(navigator, 'userAgent', {
+        Object.defineProperty(navProto, 'userAgent', {
           get: uaGet, enumerable: false, configurable: true
         });
-        Object.defineProperty(navigator, 'appVersion', {
+        Object.defineProperty(navProto, 'appVersion', {
           get: () => uaGet().replace('Mozilla/', ''), enumerable: false, configurable: true
         });
-        Object.defineProperty(navigator, 'platform', {
+        Object.defineProperty(navProto, 'platform', {
           get: () => persona.platform, enumerable: false, configurable: true
         });
 
@@ -1223,34 +1666,309 @@
             version: b.version + '.0.' + build + '.' + patch
           }));
 
-          Object.defineProperty(navigator, 'userAgentData', {
-            get: () => new Proxy(realUAD, {
-              get (target, prop) {
-                if (prop === 'brands') return brands;
-                if (prop === 'mobile') return false;
-                if (prop === 'platform') return persona.platform === 'MacIntel' ? 'macOS'
-                  : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
-                if (prop === 'getHighEntropyValues') {
-                  return (hints) => target.getHighEntropyValues(hints).then((values) => {
-                    const out = Object.assign({}, values);
-                    out.platformVersion = platformVersion;
-                    out.fullVersionList = fullVersionList;
-                    out.platform = persona.platform === 'MacIntel' ? 'macOS'
-                      : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
-                    out.mobile = false;
-                    return out;
-                  });
-                }
-                const v = Reflect.get(target, prop, target);
-                return typeof v === 'function' ? v.bind(target) : v;
+          // P1 identity stability: the Proxy used to be constructed inside the
+          // getter, so every read returned a NEW object and
+          // `navigator.userAgentData === navigator.userAgentData` was false -
+          // a one-line oracle. Build it once, exactly like navigator.plugins.
+          const uadProxy = new Proxy(realUAD, {
+            get (target, prop) {
+              if (prop === 'brands') return brands;
+              if (prop === 'mobile') return false;
+              if (prop === 'platform') return persona.platform === 'MacIntel' ? 'macOS'
+                : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
+              if (prop === 'getHighEntropyValues') {
+                return (hints) => target.getHighEntropyValues(hints).then((values) => {
+                  const out = Object.assign({}, values);
+                  out.platformVersion = platformVersion;
+                  out.fullVersionList = fullVersionList;
+                  out.platform = persona.platform === 'MacIntel' ? 'macOS'
+                    : (persona.platform === 'Win32' ? 'Windows' : 'Linux');
+                  out.mobile = false;
+                  return out;
+                });
               }
-            }), enumerable: false, configurable: true
+              const v = Reflect.get(target, prop, target);
+              return typeof v === 'function' ? v.bind(target) : v;
+            }
+          });
+          Object.defineProperty(navProto, 'userAgentData', {
+            get: () => uadProxy, enumerable: false, configurable: true
           });
         }
 
         log('[shapeshift][page][ua] Hooks installed, platform:', persona.platform);
       } catch (e) {
         log('[shapeshift][page][ua] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // KEYBOARD + VIEWPORT HOOKS (P2 7.3)
+    //
+    // navigator.keyboard.getLayoutMap() resolved to the HOST keyboard layout, a
+    // locale tell nothing else covered: a German layout behind an en-US user
+    // agent is a one-line contradiction. The layout is chosen from the same seed
+    // as every other persona, and the resolved object stays a real
+    // KeyboardLayoutMap (a Proxy over the native result) so `instanceof` and the
+    // whole Map surface keep working.
+    //
+    // visualViewport was left fully native, so a page could read the untouched
+    // accessors (owner/patch-state oracle). It is re-asserted on
+    // VisualViewport.prototype with the REAL values - rewriting the viewport
+    // breaks every scroll-driven layout, exactly like screen.orientation.
+    // ========================================================================
+    if (config.enableKeyboardProtection) {
+      try {
+        const KEYBOARD_LAYOUTS = ['QWERTY', 'QWERTZ', 'AZERTY', 'Dvorak'];
+        const layout = KEYBOARD_LAYOUTS[hashString(seed + ':kbd') % KEYBOARD_LAYOUTS.length];
+        const kb = navigator.keyboard;
+        if (kb && typeof kb.getLayoutMap === 'function') {
+          const origGetLayoutMap = kb.getLayoutMap;
+          kb.getLayoutMap = function () {
+            return origGetLayoutMap.call(this).then(function (realMap) {
+              // Rebuild the map from the chosen layout while keeping the native
+              // prototype: a plain Object would lose `instanceof` and the Map
+              // methods, which is itself a fingerprint.
+              const rows = layout === 'QWERTZ'
+                ? ['qwertzuiop', 'asdfghjkl', 'yxcvbnm']
+                : (layout === 'AZERTY'
+                  ? ['azertyuiop', 'qsdfghjklm', 'wxcvbn']
+                  : (layout === 'Dvorak'
+                    ? ['pyfgcrl', 'aoeuidhtns', 'qjkxbmwvz']
+                    : ['qwertyuiop', 'asdfghjkl', 'zxcvbnm']));
+              const codes = ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO', 'KeyP',
+                'KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK', 'KeyL',
+                'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM'];
+              const flat = rows.join('');
+              let realSet = null;
+              try { realSet = new Set(realMap.values()); } catch (e) { /* ignore */ }
+              const shadow = Object.create(Object.getPrototypeOf(realMap));
+              const pairs = new Map();
+              for (let i = 0; i < codes.length && i < flat.length; i++) {
+                // The native map's own value wins when it already reports this
+                // code, so real keyboards are only ever relabelled on top.
+                pairs.set(codes[i], flat[i]);
+              }
+              if (realSet) {
+                realMap.forEach(function (value, code) {
+                  if (!pairs.has(code)) pairs.set(code, value);
+                });
+              }
+              const proxy = new Proxy(shadow, {
+                get (target, prop) {
+                  if (prop === 'get') return (code) => pairs.get(code);
+                  if (prop === 'has') return (code) => pairs.has(code);
+                  if (prop === 'size') return pairs.size;
+                  if (prop === 'keys') return () => pairs.keys();
+                  if (prop === 'values') return () => pairs.values();
+                  if (prop === 'entries') return () => pairs.entries();
+                  if (prop === Symbol.iterator) return () => pairs.entries();
+                  const v = Reflect.get(target, prop, target);
+                  return typeof v === 'function' ? v.bind(target) : v;
+                }
+              });
+              // Preserve the native prototype chain for instanceof checks.
+              try { Object.setPrototypeOf(proxy, Object.getPrototypeOf(realMap)); } catch (e) { /* ignore */ }
+              return proxy;
+            });
+          };
+        }
+
+        const viewport = window.visualViewport;
+        const VisualViewportCtor = window.VisualViewport;
+        if (viewport && VisualViewportCtor && VisualViewportCtor.prototype) {
+          for (const prop of ['width', 'height', 'offsetLeft', 'offsetTop', 'pageLeft', 'pageTop', 'scale']) {
+            const desc = Object.getOwnPropertyDescriptor(VisualViewportCtor.prototype, prop);
+            if (!desc || typeof desc.get !== 'function') continue;
+            Object.defineProperty(VisualViewportCtor.prototype, prop, {
+              get: function () { return desc.get.call(this); },
+              enumerable: false,
+              configurable: true
+            });
+          }
+        }
+
+        log('[shapeshift][page][kbd] Hooks installed, layout:', layout);
+      } catch (e) {
+        log('[shapeshift][page][kbd] Failed:', e);
+      }
+    }
+
+    // ========================================================================
+    // WORKER + CSS-LEVEL FINGERPRINTING (P2 7.3)
+    //
+    // Two surfaces were still fully native:
+    //  1. worker realms (Worker, SharedWorker and the AudioWorklet global
+    //     scope) each start from the untouched host values, so a page could
+    //     compare its spoofed persona against the original a worker reports;
+    //  2. CSS-level probes - @media (prefers-*) and CSS.supports() are answered
+    //     by the style engine, not by the JS matchMedia shim, so a stylesheet
+    //     or a single CSS.supports() call bypassed every JS hook.
+    // Both answer from the same seed as every other surface: one profile per
+    // load, derived with hashString, never a streaming PRNG.
+    // ========================================================================
+    if (config.enableDetectionResistance) {
+      try {
+        // --- worker realms -------------------------------------------------
+        const WORKER_GLOBALS = ['Worker', 'SharedWorker'];
+        // P1 (world split): this used its own ':worker:cpu' / ':worker:mem'
+        // streams, so a page that spawned a worker and compared the two realms
+        // saw a different core count and memory class - the exact
+        // contradiction the shim exists to remove. Repeat the values the page
+        // hook already derived; reading navigator.hardwareConcurrency here
+        // would re-fuzz an already-spoofed getter and diverge the other way.
+        const navCfgForWorker = config.navigator || {};
+        const workerPersona = {
+          hardwareConcurrency: navCfgForWorker.fuzzHardwareConcurrency !== false && ssNavCores !== null
+            ? ssNavCores
+            : (navigator.hardwareConcurrency || 4),
+          deviceMemory: navCfgForWorker.fuzzDeviceMemory !== false && ssNavMemory !== null
+            ? ssNavMemory
+            : (navigator.deviceMemory || 8),
+          platform: navigator.platform
+        };
+        // Built once per load and prepended to every worker script, so a worker
+        // realm re-reads the same persona the page world reports. importScripts
+        // is the only way in - the extension ships no network API and the
+        // original script is loaded by the worker itself, not fetched here.
+        const WORKER_SHIM = [
+          '(function(){',
+          '  var P=' + JSON.stringify(workerPersona) + ';',
+          '  try{Object.defineProperty(navigator,"hardwareConcurrency",{get:function(){return P.hardwareConcurrency;},configurable:true});}catch(e){}',
+          '  try{Object.defineProperty(navigator,"deviceMemory",{get:function(){return P.deviceMemory;},configurable:true});}catch(e){}',
+          '  try{Object.defineProperty(navigator,"platform",{get:function(){return P.platform;},configurable:true});}catch(e){}',
+          '})();'
+        ].join(String.fromCharCode(10));
+        const blobUrlFor = (url) => {
+          const bootstrap = 'importScripts(' + JSON.stringify(String(url)) + ');' +
+            String.fromCharCode(10) + WORKER_SHIM;
+          return URL.createObjectURL(new Blob([bootstrap], { type: 'text/javascript' }));
+        };
+        for (let i = 0; i < WORKER_GLOBALS.length; i++) {
+          const name = WORKER_GLOBALS[i];
+          const Orig = window[name];
+          if (typeof Orig !== 'function') continue;
+          const Wrapped = function (url, options) {
+            // Module workers (`{ type: 'module' }`) cannot call importScripts -
+            // the bootstrap would throw and the worker would never start, so a
+            // site using module workers lost the feature entirely. Pass those
+            // through untouched instead of breaking them.
+            const isModule = !!(options && options.type === 'module');
+            let target = url;
+            if (!isModule) {
+              try { target = blobUrlFor(url); } catch (e) { target = url; }
+            }
+            return new Orig(target, options);
+          };
+          try {
+            Object.setPrototypeOf(Wrapped, Orig);
+            Wrapped.prototype = Orig.prototype;
+          } catch (e) { /* keep the plain wrapper */ }
+          try {
+            Object.defineProperty(window, name, {
+              value: Wrapped, enumerable: false, configurable: true, writable: true
+            });
+          } catch (e) { /* leave the native constructor in place */ }
+        }
+        // P1 (worklet clock): this block used to redefine
+        // AudioWorkletGlobalScope.prototype.currentTime as `this.__ssTime || 0`.
+        // currentTime is the audio clock a processor schedules against, not a
+        // fingerprint - pinning it to 0 froze every time-driven processor, and
+        // the `__ssTime` own property was itself an oracle. An
+        // AudioWorkletGlobalScope has no navigator, so there is no page persona
+        // to repeat there either: the realm keeps its native clock.
+        const AudioWorkletCtor = window.AudioWorkletNode;
+        if (AudioWorkletCtor && navigator.audioWorklet) {
+          log('[shapeshift][page][worker] AudioWorklet realm left on its native clock');
+        }
+
+        // --- CSS-level probes ---------------------------------------------
+        const CSS_MEDIA_PROFILES = [
+          ['prefers-color-scheme: dark', hashString(seed + ':css:scheme') % 2 === 0],
+          ['prefers-reduced-motion: reduce', hashString(seed + ':css:motion') % 4 === 0],
+          ['prefers-contrast: more', hashString(seed + ':css:contrast') % 8 === 0],
+          ['prefers-reduced-transparency: reduce', hashString(seed + ':css:transparency') % 8 === 0]
+        ];
+        const cssAnswer = (query) => {
+          const lower = String(query).toLowerCase();
+          for (let i = 0; i < CSS_MEDIA_PROFILES.length; i++) {
+            if (lower.indexOf(CSS_MEDIA_PROFILES[i][0]) !== -1) return CSS_MEDIA_PROFILES[i][1];
+          }
+          return null;
+        };
+        if (window.CSS && typeof CSS.supports === 'function') {
+          const origSupports = CSS.supports;
+          CSS.supports = function (a, b) {
+            const probe = b === undefined ? a : (String(a) + ':' + String(b));
+            const answer = cssAnswer(probe);
+            if (answer !== null) return answer;
+            return origSupports.apply(this, arguments);
+          };
+        }
+        const priorMatchMedia = window.matchMedia;
+        window.matchMedia = function (query) {
+          const result = priorMatchMedia.call(this, query);
+          const answer = cssAnswer(query);
+          if (answer === null) return result;
+          // P2 4.4 (listener oracle): addEventListener was forwarded to the
+          // REAL MediaQueryList, so a handler fired with `event.target` and
+          // `this` equal to the real list - reading `e.target.matches` there
+          // returned the un-spoofed value and defeated the shim. Each callback
+          // is wrapped so the event it observes carries this proxy as
+          // target/currentTarget and the spoofed `matches`; removal is mapped
+          // back to the original reference so removeEventListener still works.
+          const listenerMap = new WeakMap();
+          let proxy = null;
+          const wrapListener = (listener) => {
+            if (typeof listener !== 'function') return listener;
+            let wrapped = listenerMap.get(listener);
+            if (wrapped) return wrapped;
+            wrapped = function (event) {
+              let seen = event;
+              try {
+                seen = new Proxy(event, {
+                  get (t, prop) {
+                    if (prop === 'target' || prop === 'currentTarget') return proxy;
+                    if (prop === 'matches') return answer;
+                    const v = t[prop];
+                    return typeof v === 'function' ? v.bind(t) : v;
+                  }
+                });
+              } catch (err) { seen = event; }
+              return listener.call(proxy, seen);
+            };
+            listenerMap.set(listener, wrapped);
+            return wrapped;
+          };
+          proxy = new Proxy(result, {
+            get (target, prop) {
+              if (prop === 'matches') return answer;
+              if (prop === 'addEventListener' || prop === 'addListener') {
+                return function (listener, rest) {
+                  return target[prop](wrapListener(listener), rest);
+                };
+              }
+              if (prop === 'removeEventListener' || prop === 'removeListener') {
+                return function (listener, rest) {
+                  return target[prop](listenerMap.get(listener) || listener, rest);
+                };
+              }
+              const v = target[prop];
+              return typeof v === 'function' ? v.bind(target) : v;
+            }
+          });
+          // Same argument as the touch block above: without an own `matches`, a
+          // listener receives the real list as event.target and can read the
+          // un-spoofed value back out of it.
+          try {
+            Object.defineProperty(proxy, 'matches', { value: answer, configurable: true });
+          } catch (e) { /* non-extensible MediaQueryList; the get trap still wins */ }
+          return proxy;
+        };
+
+        log('[shapeshift][page][css] Worker + CSS hooks installed');
+      } catch (e) {
+        log('[shapeshift][page][css] Failed:', e);
       }
     }
 
@@ -1265,6 +1983,10 @@
         if (HTMLMediaElement.prototype.canPlayType) {
           const origCanPlayType = HTMLMediaElement.prototype.canPlayType;
           HTMLMediaElement.prototype.canPlayType = function (type) {
+            // P2 4.4: the ISOLATED canPlayType hook incremented mediaCodecReads,
+            // but the page only ever calls this MAIN-world copy, so the counter
+            // stayed at zero for a real read. Report it over the SS_STAT bridge.
+            bumpStat('mediaCodecReads');
             const result = origCanPlayType.call(this, type);
             if (roll('canplay', type) < 0.1) {
               if (result === 'maybe') return 'probably';
@@ -1277,6 +1999,7 @@
         if (window.MediaSource && MediaSource.isTypeSupported) {
           const origIsTypeSupported = MediaSource.isTypeSupported;
           MediaSource.isTypeSupported = function (type) {
+            bumpStat('mediaCodecReads');
             const result = origIsTypeSupported.call(this, type);
             // P0: flipping a supported codec to unsupported made the player pick
             // a codec the machine cannot actually decode, so playback failed.
@@ -1345,6 +2068,7 @@
         if (window.MediaRecorder && window.MediaRecorder.isTypeSupported) {
           const origRecorderSupported = window.MediaRecorder.isTypeSupported;
           window.MediaRecorder.isTypeSupported = function (type) {
+            bumpStat('mediaCodecReads');
             const result = origRecorderSupported.call(this, type);
             if (result === false &&
                 /(opus|vp8|vp9|av01|mp4a)/i.test(String(type)) &&
@@ -1353,6 +2077,25 @@
             }
             return result;
           };
+        }
+
+        // P2 4.4: the EME probe was hooked only in the ISOLATED world, where the
+        // page cannot see it - the real navigator.requestMediaKeySystemAccess
+        // stayed readable and drmReads never moved for a page-initiated call.
+        // Behaviour is deliberately unchanged (rewriting DRM breaks playback);
+        // this only makes the read observable and counted.
+        if (navigator.requestMediaKeySystemAccess) {
+          const origRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
+          const emeTarget = navProto || navigator;
+          Object.defineProperty(emeTarget, 'requestMediaKeySystemAccess', {
+            value: function (keySystem, supportedConfigurations) {
+              bumpStat('drmReads');
+              return origRequestMediaKeySystemAccess.call(this, keySystem, supportedConfigurations);
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
         }
 
         log('[shapeshift][page][media] Hooks installed');
@@ -1409,6 +2152,11 @@
         }
 
         navigator.geolocation.getCurrentPosition = function (success, error, options) {
+          // P2 (4.4): geolocationReads was declared in stats_tracker.js and
+          // summed by service-worker.js, but no hook ever incremented it, so
+          // the counter was permanently 0. Report the read from the MAIN world
+          // over the same SS_STAT channel the other MAIN hooks use.
+          bumpStat('geolocationReads');
           if (typeof success !== 'function') {
             return origGetCurrentPosition.call(this, success, error, options);
           }
@@ -1419,6 +2167,7 @@
 
         if (typeof origWatchPosition === 'function') {
           navigator.geolocation.watchPosition = function (success, error, options) {
+            bumpStat('geolocationReads');
             if (typeof success !== 'function') {
               return origWatchPosition.call(this, success, error, options);
             }
@@ -1439,18 +2188,40 @@
     // ========================================================================
     if (config.enableDetectionResistance) {
       try {
-        Object.defineProperty(navigator, 'webdriver', {
+        Object.defineProperty(navProto, 'webdriver', {
           get: () => false, enumerable: false, configurable: true
         });
+
+        // P1 4.1: performance.getEntriesByType was ISOLATED-only, so the page
+        // could read the untouched native list (owner/patch-state oracle) and
+        // the surface was unprotected in MAIN. Re-assert it here with the same
+        // timing resistance the ISOLATED installer applies.
+        if (window.performance && performance.getEntriesByType) {
+          const origGetEntriesByType = performance.getEntriesByType;
+          performance.getEntriesByType = function (type) {
+            if (globalThis.ssTimingUtils) {
+              globalThis.ssTimingUtils.randomDelaySync();
+            }
+            return origGetEntriesByType.call(this, type);
+          };
+        }
 
         if (navigator.permissions && navigator.permissions.query) {
           const origQuery = navigator.permissions.query;
           navigator.permissions.query = function (params) {
             return origQuery.call(this, params).then((status) => {
               if (params && params.name === 'notifications') {
+                // P1: reading `Notification.permission` in an unguarded branch
+                // threw ReferenceError wherever `Notification` is not defined
+                // (workers, some embedded contexts), which rejected the whole
+                // permissions.query() promise with no handler attached. Fall
+                // back to the native status when the API is absent.
+                const notifPermission = (typeof Notification !== 'undefined' && Notification)
+                  ? Notification.permission
+                  : status.state;
                 return new Proxy(status, {
                   get (t, prop) {
-                    if (prop === 'state') return Notification.permission;
+                    if (prop === 'state') return notifPermission;
                     const v = Reflect.get(t, prop, t);
                     return typeof v === 'function' ? v.bind(t) : v;
                   }
@@ -1535,10 +2306,38 @@
     // ========================================================================
     try {
       const nativeFns = new WeakSet();
+      // P2 5.3 (toString prefix): an accessor's getter/setter is a function too,
+      // and a page can read it with
+      // `Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get`
+      // then call `.toString()` on it. Those functions were not registered, so
+      // they printed the hook closure's source instead of `[native code]`, and
+      // the plain-method branch below would have dropped the `get `/`set `
+      // keyword that V8 prints for accessors (`get userAgent() { [native code] }`).
+      // Track the prefix per function so accessor shims stay indistinguishable.
+      const nativeLabels = new WeakMap();
       const registerNative = (obj, key) => {
         try {
           if (obj && typeof obj[key] === 'function') nativeFns.add(obj[key]);
         } catch (e) { /* ignore */ }
+      };
+      // Register every patched accessor on a prototype, preserving the `get `/`set `
+      // prefix and the real property name so toString() matches native output.
+      const registerAccessors = (obj, keys) => {
+        if (!obj) return;
+        for (const key of keys) {
+          try {
+            const desc = Object.getOwnPropertyDescriptor(obj, key);
+            if (!desc) continue;
+            if (typeof desc.get === 'function') {
+              nativeFns.add(desc.get);
+              nativeLabels.set(desc.get, 'get ' + key);
+            }
+            if (typeof desc.set === 'function') {
+              nativeFns.add(desc.set);
+              nativeLabels.set(desc.set, 'set ' + key);
+            }
+          } catch (e) { /* ignore */ }
+        }
       };
 
       registerNative(window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype, 'getImageData');
@@ -1564,11 +2363,104 @@
       registerNative(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype, 'getShaderPrecisionFormat');
       registerNative(window.WebGLRenderingContext && WebGLRenderingContext.prototype, 'getSupportedExtensions');
       registerNative(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype, 'getSupportedExtensions');
-      registerNative(window.AudioBuffer && AudioBuffer.prototype, 'getChannelData');
+
+      // Accessor shims installed on Navigator.prototype by the blocks above.
+      // Every name here is a data property on a real Chrome navigator whose
+      // value this extension replaces, so a page probing any of them must see
+      // the native-looking accessor source.
+      registerAccessors(navProto, [
+        'hardwareConcurrency', 'deviceMemory', 'plugins', 'mimeTypes',
+        'maxTouchPoints', 'userAgent', 'appVersion', 'platform',
+        'userAgentData', 'webdriver'
+      ]);
+      registerAccessors(Object.getPrototypeOf(window.screen) || window.screen, [
+        'width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth',
+        // P2 5.3 (toString prefix): availLeft/availTop are patched by the screen
+        // block above through the same defineGetter helper, so they are accessor
+        // shims too. Leaving them out made
+        // `Object.getOwnPropertyDescriptor(Screen.prototype, 'availLeft').get`
+        // print the hook closure instead of `get availLeft() { [native code] }`,
+        // which is a one-line oracle for exactly the two fields the extension
+        // pins to 0.
+        'availLeft', 'availTop'
+      ]);
+      // devicePixelRatio is an own accessor of the WINDOW object natively (real
+      // Chrome keeps it on the global, not on Screen.prototype), so it is
+      // registered on the same object the screen block patched.
+      registerAccessors(window, ['devicePixelRatio']);
+      // The screen.orientation block re-defines `type` and `angle` on
+      // ScreenOrientation.prototype, so those replacements are accessor shims
+      // too and must answer the native `get type() { [native code] }` shape.
+      registerAccessors(window.ScreenOrientation && window.ScreenOrientation.prototype,
+        ['type', 'angle']);
+      // P2 5.3 (toString prefix, second pass): the blocks above also replace
+      // accessors OUTSIDE Navigator/Screen - the WebGPU adapter info getter,
+      // every VisualViewport metric, the performance.memory and connection
+      // getters, and document.hidden/visibilityState. Each of those printed the
+      // hook closure when a page read `.get.toString()` off the descriptor, so
+      // they are registered on the same object the block patched.
+      registerAccessors(window.GPUAdapter && window.GPUAdapter.prototype, ['info']);
+      registerAccessors(window.VisualViewport && window.VisualViewport.prototype, [
+        'width', 'height', 'offsetLeft', 'offsetTop', 'pageLeft', 'pageTop', 'scale'
+      ]);
+      registerAccessors(performance, ['memory']);
+      registerAccessors(
+        navigator.connection || navigator.mozConnection || navigator.webkitConnection,
+        ['effectiveType', 'downlink']);
+      registerAccessors(window.Document && Document.prototype,
+        ['hidden', 'visibilityState']);
+      // The same second pass for plain methods: these are closures too, so a
+      // `.toString()` on them revealed the shim even though the values were
+      // plausible.
+      registerNative(navProto, 'requestMediaKeySystemAccess');
+      registerNative(navigator, 'getBattery');
+      registerNative(navigator, 'getGamepads');
+      // P2 5.3 (toString prefix, third pass): three more page-visible methods
+      // were patched above but never registered. `pc.addIceCandidate` and both
+      // geolocation entry points are redefined as own functions, so
+      // `.toString()` on any of them printed the hook closure - the same oracle
+      // the earlier passes closed for their siblings.
+      registerNative(window.RTCPeerConnection && window.RTCPeerConnection.prototype, 'addIceCandidate');
+      registerNative(navigator.geolocation, 'getCurrentPosition');
+      registerNative(navigator.geolocation, 'watchPosition');
+      registerNative(navigator.mediaCapabilities, 'decodingInfo');
+      // P2 5.3 (toString prefix, fourth pass): two more patched methods were
+      // still printing their hook source. `navigator.gpu.requestAdapter` is the
+      // WebGPU entry point the block above replaces, and `document.fonts.check`
+      // is replaced on the FontFaceSet instance itself. Both are reachable from
+      // a stable object at guard time, so both are registered here.
+      registerNative(navigator.gpu, 'requestAdapter');
+      registerNative(document.fonts, 'check');
+      registerNative(navigator.keyboard, 'getLayoutMap');
+      registerNative(navigator.webkitTemporaryStorage, 'queryUsageAndQuota');
+      registerNative(window.RTCRtpSender, 'getCapabilities');
+      registerNative(window.RTCRtpReceiver, 'getCapabilities');
+      registerNative(performance, 'getEntriesByType');
+      registerNative(Intl, 'DateTimeFormat');
+      registerNative(typeof CSS !== 'undefined' ? CSS : null, 'supports');
+      // P2 5.3 (toString prefix, fifth pass): three more page-visible hooks
+      // still printed their closure source. The RTCPeerConnection CONSTRUCTOR
+      // (not just its prototype methods), the FontFaceSet iterator that the
+      // font block redefines under Symbol.iterator, and the timezone
+      // `resolvedOptions` accessor that is now patched on the prototype.
+      // registerNative already supports symbol keys because `obj[key]` works
+      // for them too.
+      registerNative(window, 'RTCPeerConnection');
+      registerNative(document.fonts && Object.getPrototypeOf(document.fonts), Symbol.iterator);
+      registerNative(Intl.DateTimeFormat && Intl.DateTimeFormat.prototype, 'resolvedOptions');
 
       const origFnToString = Function.prototype.toString;
       const nativeToString = function () {
         if (typeof this === 'function' && nativeFns.has(this)) {
+          const label = nativeLabels.get(this);
+          if (label) {
+            const parts = label.split(' ');
+            // V8 prints a setter as `set NAME(v) { [native code] }`; the
+            // parameter name is not observable through toString for a native
+            // accessor, so the canonical `(v)` form is used.
+            if (parts[0] === 'set') return 'set ' + parts[1] + '(v) { [native code] }';
+            return 'get ' + parts[1] + '() { [native code] }';
+          }
           const name = this.name ? this.name : '';
           return 'function ' + name + '() { [native code] }';
         }
@@ -1589,8 +2481,12 @@
     }
 
     log('[shapeshift][page] All hooks installed successfully');
-  }, { once: true }); // One-shot: a second SS_INIT_PAGE_HOOKS must never re-install
-                      // hooks or swap the seed the page already received.
+  }); // NOTE: deliberately NOT `{ once: true }`. The ISOLATED bootstrap sends
+      // SS_PAGE_WORLD_HELLO first, and this listener consumes it before
+      // returning; a once-listener would be removed at that point, so the later
+      // SS_INIT_PAGE_HOOKS post would have no receiver and every MAIN-world hook
+      // would stay uninstalled. Re-init is prevented by the ssInitialized latch
+      // above instead. verify.mjs enforces this (no `once: true` on this listener).
 
   // Re-announce readiness (with the nonce) once all hooks are installed. The
   // first announcement already ran synchronously at document_start; this second

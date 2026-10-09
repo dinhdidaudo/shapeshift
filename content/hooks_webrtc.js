@@ -3,12 +3,32 @@
 (function () {
   const installers = (globalThis.ssHookInstallers = globalThis.ssHookInstallers || []);
 
+  // P2 7.2 (WebRTC mode): the three overlapping booleans are collapsed into one
+  // tri-state. `off` is the pass-through, `block-host-srflx` strips the
+  // candidates that carry an address, and `relay-only` is the strictest.
+  // A config written by an older build has no `mode`, so the effective value is
+  // derived from the legacy booleans. page_world_injector.js runs the identical
+  // derivation, which is what keeps the two worlds from disagreeing.
+  const WEBRTC_MODES = ['off', 'block-host-srflx', 'relay-only'];
+  function effectiveWebrtcMode (group) {
+    const g = group || {};
+    if (WEBRTC_MODES.indexOf(g.mode) !== -1) return g.mode;
+    if (g.forceRelay === true) return 'relay-only';
+    if (g.blockIPLeak === false) return 'off';
+    return 'block-host-srflx';
+  }
+
   installers.push(function installWebRTCHooks (env) {
     if (!env || !env.config?.enableWebRTCProtection) return;
     const { config } = env;
-    const blockIPLeak = config.webrtc?.blockIPLeak !== false;
-    const randomizeSDP = config.webrtc?.randomizeSDP !== false;
-    const forceRelay = config.webrtc?.forceRelay === true;
+    // P2 7.2: one explicit policy replaces the overlapping booleans. `off` is a
+    // real pass-through - the page keeps its native SDP - so the switch is no
+    // longer a no-op that still looked active. The two protected modes both
+    // strip address-bearing candidates; `relay-only` additionally pins
+    // iceTransportPolicy so no host candidate is gathered at all.
+    const webrtcMode = effectiveWebrtcMode(config.webrtc);
+    const blockIPLeak = webrtcMode !== 'off';
+    const forceRelay = webrtcMode === 'relay-only';
     const debug = config.debug ? true : false;
     const log = debug ? console.log : () => {};
 
@@ -45,13 +65,18 @@
 
         log('[shapeshift][webrtc] RTCPeerConnection created');
 
-        // Modify configuration to force relay if enabled
-        if (forceRelay && configuration) {
-          configuration.iceTransportPolicy = 'relay';
+        // Never mutate the caller's configuration object: the page owns it, may
+        // have frozen it, and may read it back to see what it passed. Build a
+        // private copy when the relay policy has to be forced.
+        let effectiveConfiguration = configuration;
+        if (forceRelay) {
+          effectiveConfiguration = Object.assign({}, configuration || {}, {
+            iceTransportPolicy: 'relay'
+          });
           log('[shapeshift][webrtc] Forced relay-only ICE');
         }
 
-        const pc = new OrigRTCPeerConnection(configuration, constraints);
+        const pc = new OrigRTCPeerConnection(effectiveConfiguration, constraints);
 
         // Hook createOffer
         const origCreateOffer = pc.createOffer;
@@ -62,9 +87,10 @@
               globalThis.ssTimingUtils.randomDelaySync();
             }
 
-            // Force relay candidates if configured
+            // Force relay candidates if configured. Same rule as the
+            // constructor: pass a copy, never mutate the page's options object.
             if (forceRelay && options) {
-              options.iceTransportPolicy = 'relay';
+              arguments[0] = Object.assign({}, options, { iceTransportPolicy: 'relay' });
             }
 
             log('[shapeshift][webrtc] createOffer called');
@@ -104,7 +130,10 @@
               // count identical (so `removed` was always 0). Filter the lines
               // out instead and count what was actually dropped.
               if (blockIPLeak) {
-                const lines = modifiedSdp.split('\n');
+                // SDP is CRLF-terminated; splitting on '\n' leaves a trailing
+                // '\r' on every line, so / typ host( |$)/ never matched and no
+                // candidate was ever removed. Split on both terminators.
+                const lines = modifiedSdp.split(/\r?\n/);
                 const kept = [];
                 let removed = 0;
                 for (const line of lines) {
@@ -120,47 +149,14 @@
                 }
               }
 
-              // Randomize SDP fingerprints
-              if (randomizeSDP) {
-                // Modify fingerprint values
-                modifiedSdp = modifiedSdp.replace(
-                  /^a=fingerprint:(\w+)\s+([0-9A-F:]+)$/gm,
-                  (match, algorithm, fingerprint) => {
-                    // Generate deterministic but different fingerprint
-                    const parts = fingerprint.split(':');
-                    const modified = parts.map((part) => {
-                      const num = parseInt(part, 16);
-                      const offset = Math.floor(stableRoll('fp', part) * 16) % 256;
-                      const newNum = (num + offset) % 256;
-                      return newNum.toString(16).toUpperCase().padStart(2, '0');
-                    });
-                    const newFingerprint = modified.join(':');
-                    log(`[shapeshift][webrtc] Randomized fingerprint: ${fingerprint.substring(0, 20)}... → ${newFingerprint.substring(0, 20)}...`);
-                    return `a=fingerprint:${algorithm} ${newFingerprint}`;
-                  }
-                );
-
-                // Modify ICE credentials (ufrag and pwd)
-                modifiedSdp = modifiedSdp.replace(
-                  /^a=ice-ufrag:(.+)$/gm,
-                  (match, ufrag) => {
-                    const suffix = Math.floor(stableRoll('ufrag', ufrag) * 0xFFFF).toString(16);
-                    const newUfrag = ufrag + suffix;
-                    log(`[shapeshift][webrtc] Modified ice-ufrag`);
-                    return `a=ice-ufrag:${newUfrag}`;
-                  }
-                );
-
-                modifiedSdp = modifiedSdp.replace(
-                  /^a=ice-pwd:(.+)$/gm,
-                  (match, pwd) => {
-                    const suffix = Math.floor(stableRoll('pwd', pwd) * 0xFFFF).toString(16);
-                    const newPwd = pwd + suffix;
-                    log(`[shapeshift][webrtc] Modified ice-pwd`);
-                    return `a=ice-pwd:${newPwd}`;
-                  }
-                );
-              }
+              // P0: the `a=fingerprint:` DTLS line and `a=ice-ufrag` / `a=ice-pwd`
+              // are the handshake credentials themselves. Rewriting any of them
+              // (as this file used to, and as MAIN world already stopped doing)
+              // makes the SDP inconsistent with what the browser will actually
+              // negotiate: ICE never authenticates, DTLS never validates the peer
+              // certificate, and every real call silently fails. `randomizeSDP`
+              // therefore no longer touches the credential lines; the SDP it can
+              // still safely scrub is the candidate list above.
 
               // P1 2.13: hand back a real RTCSessionDescription. A plain
               // {type, sdp} object breaks libraries (adapter.js,
@@ -203,12 +199,25 @@
               globalThis.ssTimingUtils.randomDelaySync();
             }
 
-            if (blockIPLeak && candidate && candidate.candidate) {
-              // Block host and srflx candidates
-              if (candidate.candidate.includes('typ host') ||
-                  candidate.candidate.includes('typ srflx')) {
-                log('[shapeshift][webrtc] Blocked ICE candidate:', candidate.candidate.substring(0, 50));
-                // Return resolved promise without adding the candidate
+            // P1: the blocked path returned a bare Promise, so the caller could
+            // not tell whether the candidate had actually been added and any
+            // `await addIceCandidate(x)` resolved a tick early. Hand back the
+            // native call's own promise when the candidate is allowed through,
+            // and a resolved promise shaped like it when the candidate is
+            // dropped - never a different thenable identity than the native one.
+            const raw = candidate && typeof candidate === 'object' ? candidate.candidate : null;
+            if (blockIPLeak && typeof raw === 'string' &&
+                (raw.indexOf('typ host') !== -1 || raw.indexOf('typ srflx') !== -1)) {
+              log('[shapeshift][webrtc] Blocked ICE candidate:', raw.substring(0, 50));
+              // P1 3.3: this branch used to hand back a bare Promise.resolve(),
+              // which is a different thenable identity than the native method's
+              // promise and can never reject - a one-line shape oracle. Call the
+              // native method with no candidate (a legal no-op that resolves) so
+              // the caller still gets a real native promise; fall back only if
+              // even that throws.
+              try {
+                return origAddIceCandidate.call(this);
+              } catch (e) {
                 return Promise.resolve();
               }
             }
@@ -266,15 +275,17 @@
               return devices;
             }
 
-            // Deterministic 32-bit FNV-1a style hash. The previous version used
-            // `hash = hash & hash` (a no-op) and then Math.abs(), which collided
-            // on the sign bit and produced a different value for negative hashes.
-            // Force unsigned with >>> 0 so the output is stable and collision-free
-            // across the full 32-bit space.
-            function hashDeviceId(deviceId, seed) {
-              let hash = (seed >>> 0) || 0x811c9dc5;
-              for (let i = 0; i < deviceId.length; i++) {
-                hash ^= deviceId.charCodeAt(i);
+            // Deterministic 32-bit FNV-1a over the whole input, starting from the
+            // FNV offset basis. P1 (world split): this used to seed the fold with
+            // the numeric seed and hash a different string than MAIN, so the page
+            // and this copy reported two different deviceIds for one device -
+            // exactly the contradiction the shim exists to prevent. This is now
+            // byte-identical to page_world_injector.js.
+            function hashDeviceId(value) {
+              let hash = 0x811c9dc5;
+              const s = String(value);
+              for (let i = 0; i < s.length; i++) {
+                hash ^= s.charCodeAt(i);
                 hash = Math.imul(hash, 0x01000193) >>> 0;
               }
               return hash.toString(16).padStart(8, '0');
@@ -304,12 +315,18 @@
               let groupId = device.groupId;
               let label = device.label;
 
-              // Randomize device IDs deterministically
+              // Randomize device IDs deterministically.
+              // P1 (world split): this used `env.seed + index`, so the ISOLATED
+              // copy of enumerateDevices reported a different deviceId for the
+              // same physical device than the MAIN-world hook - two answers for
+              // one page. Key it on (seed, kind, deviceId), exactly like
+              // page_world_injector.js does, so both worlds agree.
               if (randomizeIds && device.deviceId) {
-                const seed = env.seed + index;
-                deviceId = 'ss-' + hashDeviceId(device.deviceId, seed);
+                // Same key and same hash as page_world_injector.js: ':dev:'
+                // carries the kind, ':grp:' deliberately does not.
+                deviceId = 'ss-' + hashDeviceId(((env.seed >>> 0) || 0) + ':dev:' + device.kind + ':' + device.deviceId);
                 if (device.groupId) {
-                  groupId = 'ss-group-' + hashDeviceId(device.groupId, seed);
+                  groupId = 'ss-group-' + hashDeviceId(((env.seed >>> 0) || 0) + ':grp:' + device.groupId);
                 }
               }
 
@@ -322,8 +339,12 @@
                 };
 
                 const labels = genericLabels[device.kind] || ['Device'];
-                const labelIndex = Math.floor(stableRoll('label', device.deviceId || device.kind) * labels.length);
-                label = labels[labelIndex];
+                // Same key as MAIN: ':label:' over the real deviceId (or kind),
+                // taken modulo the list. The old path rolled a 0..1 fraction off
+                // a different ':webrtc:' stream, so the two worlds chose
+                // different labels for one device.
+                const labelHash = webrtcHash || globalThis.ssHashString;
+                label = labels[labelHash(((env.seed >>> 0) || 0) + ':label:' + (device.deviceId || device.kind)) % labels.length];
                 log(`[shapeshift][media] Spoofed label: ${device.label} → ${label}`);
               }
 

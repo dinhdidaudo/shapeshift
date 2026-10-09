@@ -5,21 +5,32 @@
   let prng = null;
   // Timing jitter is OFF by default (P1 2.14). It is invoked from every hooked
   // getter (123 call sites), so leaving it on made each property read do extra
-  // work for a signal a site can average out anyway. Opt in with
-  // config.timingJitter = true when you are specifically testing timing.
+  // work for a signal a site can average out anyway. Opt in through Options.
   let jitterEnabled = false;
+  // The configured magnitude, in milliseconds. Options renders `timingJitter`
+  // as a 0-20 slider and the schema default is the NUMBER 0.
+  let jitterMs = 0;
 
   // Initialize with PRNG after bootstrap
   function initTimingUtils(prngFunction) {
     prng = prngFunction;
     const config = globalThis.ssConfig || {};
-    jitterEnabled = config.timingJitter === true;
+    // P1 (feature completely dead): the schema default is a number
+    // (`timingJitter: 0`, rendered as a 0-20 slider) while the old check used
+    // `=== true`, so the slider could never turn the feature on - every value
+    // except the boolean `true` was read as "off". Accept either a boolean
+    // `true` from a hand-edited config or a positive number from the slider,
+    // and remember the magnitude so the delay is not a hard-coded 5 ms.
+    const raw = config.timingJitter;
+    const ms = raw === true ? 5 : Number(raw);
+    jitterMs = Number.isFinite(ms) ? Math.min(20, Math.max(0, ms)) : 0;
+    jitterEnabled = jitterMs > 0;
   }
 
-  // Add random micro-delay (0-5ms) to prevent timing measurements
+  // Add random micro-delay (0..jitterMs) to prevent timing measurements
   async function randomDelay() {
     if (!prng || !jitterEnabled) return;
-    const delay = Math.floor(prng() * 5); // 0-5ms
+    const delay = Math.floor(prng() * (jitterMs + 1));
     if (delay > 0) {
       await new Promise(resolve => setTimeout(resolve, delay));
     }

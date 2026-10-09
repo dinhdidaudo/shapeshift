@@ -19,10 +19,13 @@
 
     const smix = splitmix32(seed >>> 0);
     const state = new Uint32Array(4);
-    state[0] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[1] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[2] = (smix() * 0xFFFFFFFF) >>> 0;
-    state[3] = (smix() * 0xFFFFFFFF) >>> 0;
+    // P2: splitmix32 returns a float in [0, 1), so multiplying by 0xFFFFFFFF
+    // could never reach 0xFFFFFFFF and mapped the top of the range with a
+    // ~2^-32 bias. Multiplying by 2^32 covers the full 32-bit space uniformly.
+    state[0] = (smix() * 0x100000000) >>> 0;
+    state[1] = (smix() * 0x100000000) >>> 0;
+    state[2] = (smix() * 0x100000000) >>> 0;
+    state[3] = (smix() * 0x100000000) >>> 0;
 
     // Rotl helper
     function rotl(x, k) {
@@ -57,5 +60,16 @@
   }
 
   globalThis.ssCreatePRNG = createPRNG;
-  globalThis.ssCreateMulberry32 = createMulberry32PRNG; // For testing
+  // For testing. Declared non-enumerable at the source so it is hidden even
+  // before core/stealth.js runs cleanupGlobals().
+  try {
+    Object.defineProperty(globalThis, 'ssCreateMulberry32', {
+      value: createMulberry32PRNG,
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  } catch (e) {
+    globalThis.ssCreateMulberry32 = createMulberry32PRNG;
+  }
 })();

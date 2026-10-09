@@ -14,24 +14,33 @@ const GROUPS = {
     { key: 'webglJitter', name: 'WebGL jitter', desc: 'Amount of jitter applied to WebGL parameters.', range: [0, 10, 0.1] },
     { key: 'maskWebGLVendorStrings', name: 'Mask vendor strings', desc: 'Replace GPU vendor and renderer with plausible values.' },
     { key: 'shuffleWebGLExtensions', name: 'Shuffle extensions', desc: 'Randomise extension enumeration order.' },
+    { key: 'enableWebGPUProtection', name: 'WebGPU masking', desc: 'Report the same GPU persona through navigator.gpu.' },
+    { key: 'enableKeyboardProtection', name: 'Keyboard layout', desc: 'Report a keyboard layout that matches the user-agent persona.' },
     { key: 'enableAudioNoise', name: 'Audio noise', desc: 'Subtle offsets in AudioContext sample data.' },
     { key: 'audioNoiseStrength', name: 'Audio strength', desc: 'Magnitude of audio sample perturbation.', number: true },
     { key: 'enableFontProtection', name: 'Font protection', desc: 'Blunt font enumeration and measurement.' }
   ],
   groupNetwork: [
     { key: 'enableWebRTCProtection', name: 'WebRTC protection', desc: 'Stop local IP addresses leaking through ICE candidates.' },
-    { key: 'blockIPLeak', name: 'Block IP leak', desc: 'Strip host and srflx candidates from offers.' },
-    { key: 'randomizeSDP', name: 'Randomise SDP', desc: 'Vary session description fingerprints.' },
-    { key: 'forceRelay', name: 'Force relay only', desc: 'Maximum privacy; may break peer-to-peer calls.' },
+    // P2 7.2: the three WebRTC switches collapsed into one explicit policy.
+    // `relay-only` may break peer-to-peer calls, which is why it is not the
+    // default; `block-host-srflx` removes the address-bearing candidates while
+    // leaving a real call able to negotiate.
+    { key: 'webrtcMode', name: 'WebRTC policy', desc: 'How much of the session description ShapeShift rewrites.', enum: true, select: [['block-host-srflx', 'Block host and srflx candidates'], ['relay-only', 'Relay only (strictest)'], ['off', 'Off (leave the SDP untouched)']] },
     { key: 'enableMediaDeviceProtection', name: 'Media device protection', desc: 'Hide the real device inventory.' },
     { key: 'randomizeDeviceIds', name: 'Randomise device IDs', desc: 'Stable fake identifiers per origin.' },
     { key: 'spoofDeviceLabels', name: 'Spoof labels', desc: 'Generic labels instead of real hardware names.' },
     { key: 'enableGeolocationProtection', name: 'Geolocation fuzzing', desc: 'Small coordinate offsets on position reads.' },
+    { key: 'noiseLevel', name: 'Geolocation offset', desc: 'Maximum coordinate offset in degrees.', range: [0, 0.05, 0.001] },
     { key: 'enableSensorProtection', name: 'Sensor protection', desc: 'Battery, performance timing and device sensors.' },
     { key: 'hideGamepads', name: 'Hide gamepads', desc: 'Return no connected gamepads.' }
   ],
   groupIdentity: [
     { key: 'perOriginFingerprint', name: 'Per-origin fingerprints', desc: 'Derive an independent seed for every site.' },
+    // P2 7.4 (persona profile): 'auto' keeps the seed-derived OS family, the
+    // three explicit values pin it so the UA platform, the WebGL renderer, the
+    // WebGPU adapter and the keyboard layout all describe one real machine.
+    { key: 'persona', name: 'Persona profile', desc: 'Which OS family every spoofed surface should describe.', enum: true, select: [['auto', 'Automatic (derived from seed)'], ['windows', 'Windows'], ['mac', 'macOS'], ['linux', 'Linux']] },
     { key: 'useGaussianNoise', name: 'Gaussian noise', desc: 'Natural distribution instead of uniform noise.' },
     { key: 'enableNavigatorFuzz', name: 'Navigator fuzzing', desc: 'Vary CPU, memory and language signals.' },
     { key: 'fuzzHardwareConcurrency', name: 'Fuzz CPU cores', desc: 'Report a plausible core count.' },
@@ -50,7 +59,8 @@ const GROUPS = {
     { key: 'enableTouchProtection', name: 'Touch protection', desc: 'Normalise touch capability signals.' },
     { key: 'enableUserAgentProtection', name: 'User agent protection', desc: 'Reduce user-agent entropy.' },
     { key: 'enableMediaProtection', name: 'Media codec protection', desc: 'Blunt codec and DRM capability probing.' },
-    { key: 'enableDetectionResistance', name: 'Detection resistance', desc: 'Blunt extension and automation detection.' }
+    { key: 'enableDetectionResistance', name: 'Detection resistance', desc: 'Blunt extension and automation detection.' },
+    { key: 'timingJitter', name: 'Timing jitter', desc: 'Milliseconds of jitter added to hooked reads (0 disables).', range: [0, 20, 0.5] }
   ],
   groupDebug: [
     { key: 'notifyOnRotation', name: 'Notify on rotation', desc: 'Show a system notification when the identity rotates.' },
@@ -101,7 +111,15 @@ function switchRow(item, config) {
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.dataset.key = item.key;
-  input.checked = config[item.key] !== false;
+  // P1: an absent key used to render as ON (`!== false`), so every
+  // default-false switch (debug, forceRelay, autoRotateFingerprint,
+  // rotateOnStartup) appeared enabled on a fresh install even though the
+  // hooks read the schema default and left it off. Fall back to the same
+  // schema default the hooks use, so the panel and the runtime agree.
+  const storedSwitch = config[item.key];
+  input.checked = storedSwitch !== undefined
+    ? storedSwitch !== false
+    : DEFAULTS[item.key] !== false;
   const track = document.createElement('span');
   track.className = 'switch-track';
   const thumb = document.createElement('span');
@@ -137,7 +155,10 @@ function controlRow(item, config) {
   } else if (item.select) {
     const select = document.createElement('select');
     select.dataset.key = item.key;
-    select.dataset.kind = 'number';
+    // P2 7.2: a select may be numeric (rotation interval) or a string enum
+    // (WebRTC policy). Tagging every select as 'number' made collect() run a
+    // string value through clampNumber, so the enum was written back as NaN.
+    select.dataset.kind = item.enum ? 'enum' : 'number';
     item.select.forEach(function (pair) {
       const opt = document.createElement('option');
       opt.value = pair[0];
@@ -197,7 +218,11 @@ function collect() {
   const nodes = document.querySelectorAll('[data-key]');
   for (let i = 0; i < nodes.length; i++) {
     const el = nodes[i];
-    config[el.dataset.key] = el.dataset.kind === 'number' ? clampNumber(el.dataset.key, el.value) : el.checked;
+    if (el.dataset.kind === 'enum') {
+      config[el.dataset.key] = el.value;
+    } else {
+      config[el.dataset.key] = el.dataset.kind === 'number' ? clampNumber(el.dataset.key, el.value) : el.checked;
+    }
   }
   return config;
 }
@@ -292,6 +317,69 @@ async function renderDiagnostics() {
   }
   if (diagnostics.lastFailureOrigin) {
     host.appendChild(diagnosticRow('Last failure origin', diagnostics.lastFailureOrigin));
+  }
+}
+
+// Feature 7.3 (self-test surface): ask a real page to sample every surface.
+// The tab answers with one digest per surface plus a warning for every surface
+// it could not reach, so a tab without WebGL or Web Audio no longer reports a
+// healthy-looking composite hash that proved nothing.
+async function renderSelfTest() {
+  const host = $('selfTestBody');
+  if (!host) return;
+  host.textContent = '';
+  host.appendChild(diagnosticRow('Status', 'Running...'));
+
+  let tabs = [];
+  try {
+    tabs = await new Promise(function (resolve) {
+      chrome.tabs.query({}, function (list) { resolve(list || []); });
+    });
+  } catch (e) { /* tabs permission unavailable */ }
+
+  // The options page itself is chrome-extension://, so it never qualifies.
+  const candidates = tabs.filter(function (t) {
+    return t && t.id != null && /^https?:/i.test(t.url || '');
+  });
+  let tab = null;
+  for (let i = 0; i < candidates.length; i++) {
+    if (candidates[i].active) { tab = candidates[i]; break; }
+  }
+  if (!tab) tab = candidates[0] || null;
+
+  host.textContent = '';
+  if (!tab) {
+    host.appendChild(diagnosticRow('Status', 'No http(s) tab is open - load a site and run the test again.'));
+    return;
+  }
+
+  let response = null;
+  try {
+    response = await chrome.tabs.sendMessage(tab.id, { type: 'SS_RUN_SELF_TEST' });
+  } catch (e) { /* no content script answered */ }
+
+  host.textContent = '';
+  if (!response || !response.success) {
+    host.appendChild(diagnosticRow('Target', tab.url || 'unknown'));
+    host.appendChild(diagnosticRow('Status', 'Not installed on this tab - reload it and run the test again.'));
+    if (response && response.error) host.appendChild(diagnosticRow('Reason', response.error));
+    return;
+  }
+
+  const report = response.report || {};
+  const parts = report.parts || {};
+  const labels = { canvas: 'Canvas', webgl: 'WebGL', audio: 'Audio', navigator: 'Navigator' };
+  ['canvas', 'webgl', 'audio', 'navigator'].forEach(function (key) {
+    if (parts[key]) host.appendChild(diagnosticRow(labels[key], parts[key]));
+  });
+  host.appendChild(diagnosticRow('Composite', report.composite || 'unavailable'));
+  host.appendChild(diagnosticRow('Target', tab.url || 'unknown'));
+
+  const warnings = Array.isArray(report.warnings) ? report.warnings : [];
+  if (warnings.length) {
+    warnings.forEach(function (w) { host.appendChild(diagnosticRow('Not available', w)); });
+  } else {
+    host.appendChild(diagnosticRow('Warnings', 'None - every surface answered'));
   }
 }
 
@@ -412,24 +500,56 @@ async function main() {
     });
   }
 
+  // P2 7.2 (feature): the named profiles were `balanced` / `strict` / `compat`
+  // and the patch was applied with a two-way branch - `number` wrote `.value`,
+  // everything else wrote `.checked`. `webrtcMode` is a <select> rendered with
+  // `data-kind="enum"`, so every preset wrote a *string* into `.checked` (a
+  // no-op property) and the WebRTC policy silently stayed whatever it was. The
+  // preset row therefore never actually changed the one setting it advertised.
+  // Three explicit levels now, each patching the enum through `.value`.
   const presets = {
-    balanced: { canvasNoiseStrength: 2, webglJitter: 2, enableDetectionResistance: true, forceRelay: false, audioNoiseStrength: 1e-7 },
-    strict: { canvasNoiseStrength: 6, webglJitter: 6, enableDetectionResistance: true, forceRelay: true, audioNoiseStrength: 1e-6 },
-    compat: { canvasNoiseStrength: 0.6, webglJitter: 0.6, enableDetectionResistance: false, forceRelay: false, audioNoiseStrength: 1e-8 }
+    light: {
+      canvasNoiseStrength: 0.6, webglJitter: 0.6, audioNoiseStrength: 1e-8,
+      enableDetectionResistance: false, webrtcMode: 'off',
+      enableWebGPUProtection: false, enableKeyboardProtection: false
+    },
+    balanced: {
+      canvasNoiseStrength: 2, webglJitter: 2, audioNoiseStrength: 1e-7,
+      enableDetectionResistance: true, webrtcMode: 'block-host-srflx',
+      enableWebGPUProtection: true, enableKeyboardProtection: true
+    },
+    maximum: {
+      canvasNoiseStrength: 6, webglJitter: 6, audioNoiseStrength: 1e-6,
+      enableDetectionResistance: true, webrtcMode: 'relay-only',
+      enableWebGPUProtection: true, enableKeyboardProtection: true
+    }
   };
+  const presetLabels = { light: 'Light', balanced: 'Balanced', maximum: 'Maximum' };
   const presetBtns = document.querySelectorAll('.preset');
   for (let i = 0; i < presetBtns.length; i++) {
     presetBtns[i].addEventListener('click', function () {
-      const patch = presets[presetBtns[i].dataset.preset];
+      const name = presetBtns[i].dataset.preset;
+      const patch = presets[name];
       if (!patch) return;
       Object.keys(patch).forEach(function (key) {
         const el = document.querySelector('[data-key="' + key + '"]');
         if (!el) return;
-        if (el.dataset.kind === 'number') el.value = patch[key];
-        else el.checked = patch[key];
+        // A checkbox is the only control without an explicit kind; selects are
+        // 'enum' and sliders/number inputs are 'number'. Both of those take the
+        // value directly so a string enum reaches the right property.
+        if (!el.dataset.kind) {
+          el.checked = !!patch[key];
+        } else {
+          el.value = patch[key];
+          // A slider's value chip is refreshed only by its own 'input' listener,
+          // so a preset that wrote .value directly left the chip showing the old
+          // number next to the new slider position. Dispatch the event the
+          // control already listens for instead of duplicating the formatting.
+          el.dispatchEvent(new Event('input', { bubbles: false }));
+        }
       });
       updateOverview(collect());
-      toast('Preset applied: ' + presetBtns[i].dataset.preset + '. Remember to save.');
+      toast('Preset applied: ' + (presetLabels[name] || name) + '. Remember to save.');
     });
   }
 
@@ -448,6 +568,13 @@ async function main() {
     $('refreshDiagnosticsBtn').addEventListener('click', function () {
       renderDiagnostics();
       toast('Diagnostics refreshed');
+    });
+  }
+
+  if ($('runSelfTestBtn')) {
+    $('runSelfTestBtn').addEventListener('click', async function () {
+      toast('Running self-test');
+      await renderSelfTest();
     });
   }
 

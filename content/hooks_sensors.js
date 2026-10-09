@@ -281,12 +281,18 @@
         const emptyPlugins = makeEmptyView(realPlugins);
         const emptyMimeTypes = makeEmptyView(realMimeTypes);
 
-        Object.defineProperty(navigator, 'plugins', {
+        // P1 5.3 (own-property leak): defining these getters on the navigator
+        // INSTANCE put plugins/mimeTypes into Object.getOwnPropertyNames(
+        // navigator), which real Chrome never does - both are accessors on
+        // Navigator.prototype. Patch the prototype so the instance's own
+        // property list stays empty.
+        const navTarget = Object.getPrototypeOf(navigator) || navigator;
+        Object.defineProperty(navTarget, 'plugins', {
           get: () => emptyPlugins,
           enumerable: false,
           configurable: true
         });
-        Object.defineProperty(navigator, 'mimeTypes', {
+        Object.defineProperty(navTarget, 'mimeTypes', {
           get: () => emptyMimeTypes,
           enumerable: false,
           configurable: true

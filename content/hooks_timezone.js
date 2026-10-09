@@ -92,8 +92,13 @@
     const offsetKey = String(realOffset);
     const candidates = timezonesByOffset[offsetKey] || [];
     const realZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const sampleA = new Date();
-    const sampleB = new Date(Date.now() + 182 * 24 * 60 * 60 * 1000);
+    // P1 determinism: this probe pair must be a function of the seed only. It
+    // used to be `new Date()` / `Date.now() + 182d`, which made the candidate
+    // zone set depend on the day the page loaded, so the same origin could
+    // report a different zone after a DST boundary. Fixed instants keep the set
+    // - and the hash pick over it - identical on every load, in both worlds.
+    const sampleA = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
+    const sampleB = new Date(Date.UTC(2024, 6, 15, 12, 0, 0));
     const realA = zoneOffsetMinutes(realZone, sampleA);
     const realB = zoneOffsetMinutes(realZone, sampleB);
     const availableZones = candidates.filter(function (z) {
@@ -129,27 +134,32 @@
       if (globalThis.ssStealth && !globalThis.ssStealth.isPatched(OrigDateTimeFormat)) {
         globalThis.ssStealth.markPatched(OrigDateTimeFormat);
 
+        // P2 5.5 (own-property leak / cross-world parity): this used to assign a
+        // fresh closure to EVERY formatter instance, so
+        // `Object.getOwnPropertyNames(new Intl.DateTimeFormat())` reported
+        // ['resolvedOptions'] where real Chrome reports [] - a one-line oracle -
+        // and it disagreed with page_world_injector.js, which patches the shared
+        // prototype. One prototype patch keeps both worlds presenting the same
+        // surface, and the instance's own property list stays empty.
+        const origResolvedOptions = OrigDateTimeFormat.prototype.resolvedOptions;
+        OrigDateTimeFormat.prototype.resolvedOptions = function () {
+          // Track statistics
+          if (globalThis.ssStatsTracker) {
+            globalThis.ssStatsTracker.increment('timezoneReads');
+          }
+
+          if (globalThis.ssTimingUtils) {
+            globalThis.ssTimingUtils.randomDelaySync();
+          }
+
+          const options = origResolvedOptions.call(this);
+          // Only spoof the timezone name, offset remains unchanged
+          options.timeZone = spoofedTimezone;
+          return options;
+        };
+
         Intl.DateTimeFormat = function () {
-          const formatter = new OrigDateTimeFormat(...arguments);
-          const origResolvedOptions = formatter.resolvedOptions;
-
-          formatter.resolvedOptions = function () {
-            // Track statistics
-            if (globalThis.ssStatsTracker) {
-              globalThis.ssStatsTracker.increment('timezoneReads');
-            }
-
-            if (globalThis.ssTimingUtils) {
-              globalThis.ssTimingUtils.randomDelaySync();
-            }
-
-            const options = origResolvedOptions.call(this);
-            // Only spoof the timezone name, offset remains unchanged
-            options.timeZone = spoofedTimezone;
-            return options;
-          };
-
-          return formatter;
+          return new OrigDateTimeFormat(...arguments);
         };
 
         // Preserve the full static surface (supportedLocalesOf, formatRange,

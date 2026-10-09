@@ -49,11 +49,28 @@
 
     // P2: ssStatsTracker was missing from this list, so it stayed an
     // enumerable own property of globalThis and was trivially discoverable.
+    // P2: the list was a partial enumeration, so every `ss*` global added after
+    // it was written stayed an enumerable own property of globalThis - one
+    // `Object.keys(globalThis)` away from revealing the extension. The whole
+    // namespace is now covered, including the KDF/PRNG helpers that leaked
+    // (ssDeriveStrongSeed, ssDeriveSeedSimple, ssDeriveSurfaceSeed,
+    // ssCreateMulberry32) and the config/salt loaders.
+    // P2: the list is now the *complete* set of ss* globals the runtime
+    // assigns, verified by scripts/verify.mjs. The schema aliases
+    // (ssConfigSchema, ssDefaultConfig, ssFlatDefaults, ssFlatToNested) and
+    // ssNormalizeConfig were added after this list was written and stayed
+    // enumerable, which is exactly the drift the gate now prevents.
     const makeNonEnumerable = [
-      'ssConfig', 'ssGetSalt', 'ssDeriveSeed', 'ssHashString',
-      'ssCreatePRNG', 'ssPRNG', 'ssNoise', 'ssEnv', 'ssReady',
-      'ssHookInstallers', 'ssTestFingerprint', 'ssTimingUtils',
-      'ssStatsTracker'
+      'ssConfig', 'ssLoadConfig', 'ssMigrateConfig', 'ssNormalizeConfig',
+      'ssGetSalt', 'ssConfigSchema', 'ssDefaultConfig', 'ssFlatDefaults',
+      'ssFlatToNested', 'ssDeriveSeed', 'ssDeriveSeedSimple',
+      'ssDeriveStrongSeed', 'ssDeriveSurfaceSeed', 'ssHashString', 'ssMixString',
+      'ssClampIterations', 'ssFnvInit', 'ssFnvUpdate', 'ssCreatePRNG',
+      'ssCreateMulberry32', 'ssPRNG', 'ssNoise', 'ssEnv', 'ssReady',
+      'ssHookInstallers', 'ssTestFingerprint', 'ssTestFingerprintReport', 'ssTimingUtils', 'ssStatsTracker',
+      // P2 7.1: the seed-epoch accessors are part of the same namespace and
+      // would otherwise be the only ss* globals visible to Object.keys().
+      'ssSeedEpoch', 'ssBumpSeedEpoch'
     ];
 
     makeNonEnumerable.forEach(prop => {

@@ -157,31 +157,65 @@
     safeWrap(() => {
       if (!document.fonts) return;
 
-      const fontArray = Array.from(document.fonts);
+      // P1: this hook site had no ssStealth guard at all, so a second install
+      // (or a second content-script run) re-wrapped Symbol.iterator and the
+      // page could see the wrap count change. Guard on the FontFaceSet object
+      // itself, since the patched property is a well-known Symbol.
+      if (globalThis.ssStealth && globalThis.ssStealth.isPatched(document.fonts)) return;
+      if (globalThis.ssStealth) globalThis.ssStealth.markPatched(document.fonts);
 
-      // P1: this used the streaming PRNG, so the font list order changed on
-      // every document that installed the hook. A stable order per origin is
-      // what a real FontFaceSet looks like; key the permutation on the seed.
+      // P1: the snapshot used to be taken ONCE at install time. `document.fonts`
+      // is live - a page that loads a webfont after this runs would find it
+      // missing from the iteration, which is both wrong and a stable detection
+      // signal (the real set grows, ours never did). Read the live set on every
+      // iteration and key the permutation on the seed so repeat iterations of
+      // an unchanged set still agree with each other and with the MAIN world.
       const fontSeed = (env.seed >>> 0) || 0;
-      const shuffledFonts = fontArray.slice();
-      for (let i = shuffledFonts.length - 1; i > 0; i--) {
-        const j = globalThis.ssHashString
-          ? globalThis.ssHashString(fontSeed + ':fontorder:' + i) % (i + 1)
-          : i;
-        [shuffledFonts[i], shuffledFonts[j]] = [shuffledFonts[j], shuffledFonts[i]];
-      }
+      const hashString = globalThis.ssHashString;
 
-      // Override iterator
+      // P1: patch the PROTOTYPE, not the `document.fonts` instance. An own
+      // Symbol.iterator on the instance is a property a real page never sees
+      // (Chrome's FontFaceSet carries the iterator on its prototype), so the
+      // old instance patch left a one-line marker behind. The MAIN world
+      // already patches the prototype for exactly this reason
+      // (page_world_injector.js, "P1 4.1"), and both worlds now permute with
+      // the same (seed, index, family) key. Reading the live set through the
+      // ORIGINAL iterator is also what stops the patch below from recursing
+      // into itself.
+      const FontFaceSetProto = Object.getPrototypeOf(document.fonts);
+      const origIterator = FontFaceSetProto && FontFaceSetProto[Symbol.iterator];
+      const shuffledFonts = () => {
+        const out = Array.from(origIterator.call(document.fonts));
+        for (let i = out.length - 1; i > 0; i--) {
+          const j = hashString
+            ? hashString(fontSeed + ':fontorder:' + i + ':' + out[i].family) % (i + 1)
+            : i;
+          const tmp = out[i]; out[i] = out[j]; out[j] = tmp;
+        }
+        return out;
+      };
+
+      // Override the prototype iterator
       try {
-        Object.defineProperty(document.fonts, Symbol.iterator, {
-          value: function* () {
-            yield* shuffledFonts;
-          },
-          writable: false,
-          enumerable: false,
-          configurable: true
-        });
-        log('[shapeshift][fonts] Font iterator shuffled');
+        if (origIterator) {
+          Object.defineProperty(FontFaceSetProto, Symbol.iterator, {
+            value: function () {
+              const live = shuffledFonts();
+              const iterator = live[Symbol.iterator]();
+              // Keep the native iterator's prototype so
+              // Object.prototype.toString.call(it) still reports the native
+              // tag instead of "Array Iterator".
+              try {
+                Object.setPrototypeOf(iterator, Object.getPrototypeOf(origIterator.call(document.fonts)));
+              } catch (e) { /* keep the array iterator */ }
+              return iterator;
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          log('[shapeshift][fonts] Font iterator shuffled');
+        }
       } catch (e) {
         // May fail in some browsers
       }

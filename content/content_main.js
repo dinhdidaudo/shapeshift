@@ -95,4 +95,26 @@
       globalThis.ssStealth.cleanupGlobals();
     }
   });
+
+  // Feature 7.3 (self-test surface): the Options diagnostics button asks the
+  // active tab to sample every surface on demand, instead of the user digging
+  // the composite hash out of the console. The listener lives in the ISOLATED
+  // world, so the page can neither see nor call it, and it answers with the
+  // per-surface digests plus warnings for surfaces the sampler could not reach
+  // on this tab (no WebGL, no Web Audio, ...).
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+      if (!message || message.type !== 'SS_RUN_SELF_TEST') return;
+      const report = globalThis.ssTestFingerprintReport;
+      if (typeof report !== 'function') {
+        sendResponse({ success: false, error: 'self-test not available' });
+        return true;
+      }
+      Promise.resolve()
+        .then(report)
+        .then(function (r) { sendResponse({ success: true, report: r }); })
+        .catch(function (e) { sendResponse({ success: false, error: String((e && e.message) || e) }); });
+      return true; // keep the channel open for the async reply
+    });
+  }
 })();
